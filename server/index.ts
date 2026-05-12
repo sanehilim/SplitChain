@@ -3,7 +3,7 @@ import dotenv from 'dotenv'
 import express from 'express'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
-import { getHealthPayload, getMarketAssets, getSodexTickers } from './splitchainApi'
+import { getHealthPayload, getMarketAssets, getSodexTickers } from './splitchainApi.js'
 
 dotenv.config({ path: existsSync('.env.local') ? '.env.local' : '.env' })
 

@@ -1,3 +1,5 @@
+/// <reference types="node" />
+
 export type Currency = {
   currency_id: string
   symbol: string
