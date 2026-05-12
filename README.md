@@ -4,6 +4,14 @@ SplitChain is a wallet-native Web3 expense-sharing app for groups that split cos
 
 The app lets users create shared groups, add wallet members, record real token expenses, calculate who owes whom, simplify debts into fewer transfers, and settle those transfers through an injected EVM wallet.
 
+## Live App
+
+Production deployment:
+
+```txt
+https://splitchain-blond.vercel.app
+```
+
 ## What Problem It Solves
 
 Crypto users already share payments in real life:
@@ -116,6 +124,8 @@ SoSoValue powers token pricing through the server-side API layer:
 
 The browser never receives the SoSoValue API key. It only calls SplitChain's `/api/market/assets` route.
 
+If the SoSoValue key is temporarily quota-limited, the API keeps the app usable by falling back to real SoDEX public spot ticker prices for supported pairs such as BTC, ETH, SOL, and BNB. Stablecoin entries use stablecoin parity so USDC/USDT expense splitting and settlement demos continue to work.
+
 ### SoDEX
 
 SoDEX public spot ticker data powers the market signal panel through:
@@ -224,6 +234,12 @@ Deployment command:
 ```bash
 npx vercel --prod
 ```
+
+Current production env status:
+
+- `SOSOVALUE_API_KEY`: set in Vercel Production
+- `SOSOVALUE_API_BASE`: set in Vercel Production
+- `SODEX_SPOT_BASE`: set in Vercel Production
 
 ## Validation Checklist
 

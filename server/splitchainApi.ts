@@ -273,10 +273,16 @@ async function getFallbackMarketAssets(symbols: string[]): Promise<MarketAsset[]
           return { symbol, source: 'missing', updatedAt }
         }
 
+        const price = readTickerNumber(ticker, ['lastPx', 'lastPrice', 'price', 'close', 'c'])
+
+        if (!price || price <= 0) {
+          return { symbol, source: 'missing', updatedAt }
+        }
+
         return {
           symbol,
           name: symbol,
-          price: readTickerNumber(ticker, ['lastPx', 'lastPrice', 'price', 'close', 'c']),
+          price,
           changePct24h: readTickerNumber(ticker, ['changePct', 'priceChangePercent', 'change24h', 'P']),
           turnover24h: readTickerNumber(ticker, ['quoteVolume', 'turnover_24h']),
           high24h: readTickerNumber(ticker, ['highPx', 'high_24h']),
