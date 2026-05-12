@@ -1,5 +1,5 @@
-import { getSodexTickers } from '../../server/splitchainApi'
-import type { ApiRequest, ApiResponse } from '../_types'
+import { getSodexTickers } from '../../server/splitchainApi.js'
+import type { ApiRequest, ApiResponse } from '../_types.js'
 
 export default async function handler(request: ApiRequest, response: ApiResponse) {
   try {
