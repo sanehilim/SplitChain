@@ -27,7 +27,7 @@ export type MarketAsset = {
   high24h?: number
   low24h?: number
   rank?: number
-  source: 'sosovalue' | 'missing'
+  source: 'sosovalue' | 'sodex' | 'stablecoin' | 'missing'
   updatedAt: string
 }
 
@@ -40,6 +40,13 @@ const currencyCache: CacheEntry<Currency[]> = { expiresAt: 0, value: [] }
 const snapshotCache = new Map<string, CacheEntry<CurrencySnapshot>>()
 const currencyAliases: Record<string, string> = {
   MATIC: 'POL',
+}
+const stableSymbols = new Set(['USDC', 'USDT'])
+const sodexSymbols: Record<string, string> = {
+  BTC: 'vBTC_vUSDC',
+  ETH: 'vETH_vUSDC',
+  SOL: 'vSOL_vUSDC',
+  BNB: 'vBNB_vUSDC',
 }
 
 export function getSosoBase(): string {
@@ -175,10 +182,20 @@ export function parseSymbolList(symbolsParam: unknown): string[] {
 
 export async function getMarketAssets(symbolsParam: unknown): Promise<{ assets: MarketAsset[] }> {
   const symbols = parseSymbolList(symbolsParam)
+
+  try {
+    return { assets: await getSosoMarketAssets(symbols) }
+  } catch {
+    return { assets: await getFallbackMarketAssets(symbols) }
+  }
+}
+
+async function getSosoMarketAssets(symbols: string[]): Promise<MarketAsset[]> {
   const currencies = await getCurrencies()
   const bySymbol = new Map(currencies.map((currency) => [currency.symbol.toUpperCase(), currency]))
   const updatedAt = new Date().toISOString()
-  const assets = await Promise.all(
+
+  return Promise.all(
     symbols.map(async (symbol): Promise<MarketAsset> => {
       const currency = bySymbol.get(symbol) ?? bySymbol.get(currencyAliases[symbol] ?? '')
 
@@ -204,8 +221,6 @@ export async function getMarketAssets(symbolsParam: unknown): Promise<{ assets: 
       }
     }),
   )
-
-  return { assets }
 }
 
 export async function getSodexTickers(symbolParam: unknown): Promise<{
@@ -226,4 +241,65 @@ export async function getSodexTickers(symbolParam: unknown): Promise<{
     source: getSodexSpotBase(),
     updatedAt: new Date().toISOString(),
   }
+}
+
+async function getFallbackMarketAssets(symbols: string[]): Promise<MarketAsset[]> {
+  const updatedAt = new Date().toISOString()
+
+  return Promise.all(
+    symbols.map(async (symbol): Promise<MarketAsset> => {
+      if (stableSymbols.has(symbol)) {
+        return {
+          symbol,
+          name: symbol,
+          price: 1,
+          changePct24h: 0,
+          source: 'stablecoin',
+          updatedAt,
+        }
+      }
+
+      const sodexSymbol = sodexSymbols[symbol]
+
+      if (!sodexSymbol) {
+        return { symbol, source: 'missing', updatedAt }
+      }
+
+      try {
+        const tickers = await sodexFetch<unknown[]>(`/markets/tickers?symbol=${encodeURIComponent(sodexSymbol)}`)
+        const ticker = Array.isArray(tickers) ? tickers[0] : undefined
+
+        if (!isRecord(ticker)) {
+          return { symbol, source: 'missing', updatedAt }
+        }
+
+        return {
+          symbol,
+          name: symbol,
+          price: readTickerNumber(ticker, ['lastPx', 'lastPrice', 'price', 'close', 'c']),
+          changePct24h: readTickerNumber(ticker, ['changePct', 'priceChangePercent', 'change24h', 'P']),
+          turnover24h: readTickerNumber(ticker, ['quoteVolume', 'turnover_24h']),
+          high24h: readTickerNumber(ticker, ['highPx', 'high_24h']),
+          low24h: readTickerNumber(ticker, ['lowPx', 'low_24h']),
+          source: 'sodex',
+          updatedAt,
+        }
+      } catch {
+        return { symbol, source: 'missing', updatedAt }
+      }
+    }),
+  )
+}
+
+function readTickerNumber(record: Record<string, unknown>, keys: string[]): number | undefined {
+  for (const key of keys) {
+    const value = record[key]
+    const parsed = asNumber(value)
+
+    if (parsed !== undefined) {
+      return parsed
+    }
+  }
+
+  return undefined
 }

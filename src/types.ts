@@ -53,7 +53,7 @@ export type MarketAsset = {
   high24h?: number
   low24h?: number
   rank?: number
-  source: 'sosovalue' | 'missing'
+  source: 'sosovalue' | 'sodex' | 'stablecoin' | 'missing'
   updatedAt: string
 }
 
