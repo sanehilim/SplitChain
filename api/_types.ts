@@ -1,5 +1,8 @@
 export type ApiRequest = {
+  method?: string
   query: Record<string, string | string[] | undefined>
+  headers?: Record<string, string | string[] | undefined>
+  body?: unknown
 }
 
 export type ApiResponse = {

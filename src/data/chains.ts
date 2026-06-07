@@ -63,7 +63,7 @@ export const chains: ChainConfig[] = [
     name: 'Polygon',
     shortName: 'POL',
     hexChainId: '0x89',
-    nativeToken: 'MATIC',
+    nativeToken: 'POL',
     explorerTx: 'https://polygonscan.com/tx/',
     rpcUrls: ['https://polygon-rpc.com'],
     tokenContracts: {
@@ -87,8 +87,8 @@ export const chains: ChainConfig[] = [
   },
 ]
 
-export const trackedTokens = ['USDC', 'USDT', 'ETH', 'BTC', 'SOL', 'MATIC', 'BNB'] as const
-export const settlementTokens = ['USDC', 'USDT', 'ETH', 'MATIC', 'BNB'] as const
+export const trackedTokens = ['USDC', 'USDT', 'ETH', 'BTC', 'SOL', 'POL', 'MATIC', 'BNB'] as const
+export const settlementTokens = ['USDC', 'USDT', 'ETH', 'POL', 'BNB'] as const
 
 export function getChain(chainId: number): ChainConfig {
   return chains.find((chain) => chain.id === chainId) ?? chains[0]

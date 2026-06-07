@@ -10,7 +10,8 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "start": "cross-env NODE_ENV=production tsx server/index.ts"
+    "start": "cross-env NODE_ENV=production tsx server/index.ts",
+    "test": "tsx --test --test-concurrency=1 tests/**/*.test.ts"
   },
   "dependencies": {
     "cors": "^2.8.6",
@@ -19,7 +20,7 @@
     "lucide-react": "^1.14.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
-    "viem": "^2.48.11"
+    "viem": "^2.52.2"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

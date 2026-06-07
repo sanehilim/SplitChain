@@ -3,7 +3,18 @@ import dotenv from 'dotenv'
 import express from 'express'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
-import { getHealthPayload, getMarketAssets, getSodexTickers } from './splitchainApi.js'
+import {
+  assertPublicApiRateLimit,
+  getCloudWorkspace,
+  getHealthPayload,
+  getIndexSnapshots,
+  getMarketAssets,
+  getSodexTickers,
+  PublicRateLimitError,
+  readClientRateLimitKey,
+  readWorkspaceAuth,
+  saveCloudWorkspace,
+} from './splitchainApi.js'
 
 dotenv.config({ path: existsSync('.env.local') ? '.env.local' : '.env' })
 
@@ -11,7 +22,7 @@ const app = express()
 const port = Number(process.env.PORT ?? 8787)
 
 app.use(cors())
-app.use(express.json())
+app.use(express.json({ limit: '1mb' }))
 
 app.get('/api/health', (_request, response) => {
   response.json(getHealthPayload())
@@ -19,20 +30,56 @@ app.get('/api/health', (_request, response) => {
 
 app.get('/api/market/assets', async (request, response) => {
   try {
+    assertPublicApiRateLimit('market-assets', readClientRateLimitKey(request.headers, request.ip))
     response.json(await getMarketAssets(request.query.symbols))
   } catch (error) {
-    response.status(502).json({
+    response.status(error instanceof PublicRateLimitError ? error.statusCode : 502).json({
       error: error instanceof Error ? error.message : 'Unable to load SoSoValue market data.',
+    })
+  }
+})
+
+app.get('/api/market/indexes', async (request, response) => {
+  try {
+    assertPublicApiRateLimit('market-indexes', readClientRateLimitKey(request.headers, request.ip))
+    response.json(await getIndexSnapshots(request.query.tickers))
+  } catch (error) {
+    response.status(error instanceof PublicRateLimitError ? error.statusCode : 502).json({
+      error: error instanceof Error ? error.message : 'Unable to load SoSoValue Index data.',
     })
   }
 })
 
 app.get('/api/sodex/tickers', async (request, response) => {
   try {
-    response.json(await getSodexTickers(request.query.symbol))
+    assertPublicApiRateLimit('sodex-tickers', readClientRateLimitKey(request.headers, request.ip))
+    response.json(await getSodexTickers(request.query.symbol, request.query.symbols))
+  } catch (error) {
+    response.status(error instanceof PublicRateLimitError ? error.statusCode : 502).json({
+      error: error instanceof Error ? error.message : 'Unable to load SoDEX tickers.',
+    })
+  }
+})
+
+app.get('/api/workspace', async (request, response) => {
+  try {
+    response.json(await getCloudWorkspace(request.query.owner, readWorkspaceAuth(request.headers)))
   } catch (error) {
     response.status(502).json({
-      error: error instanceof Error ? error.message : 'Unable to load SoDEX tickers.',
+      error: error instanceof Error ? error.message : 'Unable to load cloud workspace.',
+    })
+  }
+})
+
+app.post('/api/workspace', async (request, response) => {
+  try {
+    const payload = typeof request.body === 'object' && request.body !== null && 'payload' in request.body
+      ? request.body.payload
+      : request.body
+    response.json(await saveCloudWorkspace(request.query.owner, payload, readWorkspaceAuth(request.headers)))
+  } catch (error) {
+    response.status(502).json({
+      error: error instanceof Error ? error.message : 'Unable to save cloud workspace.',
     })
   }
 })

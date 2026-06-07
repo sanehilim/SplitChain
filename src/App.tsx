@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react'
 import {
   ArrowRight,
   BarChart3,
@@ -16,18 +16,20 @@ import {
   Settings,
   ShieldCheck,
   Split,
+  Upload,
   UserPlus,
   Wallet,
 } from 'lucide-react'
 import heroImg from './assets/hero.png'
 import './App.css'
-import { chains, getChain, getSupportedSettlementTokens, trackedTokens } from './data/chains'
+import { chains, getChain, getSupportedSettlementTokens, isNativeSettlementToken, trackedTokens } from './data/chains'
 import { usePersistentState } from './hooks/usePersistentState'
 import {
   calculateBalances,
   formatToken,
   formatUsd,
   getAsset,
+  getExpenseAmountUsd,
   getMembersForGroup,
   getRawTransferCount,
   getTokenPrice,
@@ -36,10 +38,22 @@ import {
   memberName,
   shortAddress,
   simplifyDebts,
-  toUsd,
 } from './lib/finance'
-import { connectWallet, getWalletState, sendSettlementTransaction } from './lib/wallet'
-import type { Expense, Group, MarketAsset, MarketStatus, Member, OptimizedTransfer, SettlementRecord, SplitMode, WalletState } from './types'
+import { connectWallet, getWalletState, sendSettlementTransaction, signWorkspaceRequest, waitForTransactionConfirmation } from './lib/wallet'
+import { normalizeWorkspacePayload } from './lib/workspace'
+import type {
+  Expense,
+  Group,
+  IndexSnapshot,
+  MarketAsset,
+  MarketStatus,
+  Member,
+  OptimizedTransfer,
+  SettlementRecord,
+  SplitMode,
+  WalletState,
+  WorkspacePayload,
+} from './types'
 
 type Notice = {
   type: 'info' | 'success' | 'error'
@@ -55,9 +69,31 @@ type SodexState = {
   updatedAt: string
 }
 
+type IndexState = {
+  loading: boolean
+  error: string
+  indexes: IndexSnapshot[]
+  updatedAt: string
+}
+
+type CloudState = {
+  loading: boolean
+  message: string
+}
+
 const categories = ['Travel', 'DAO Ops', 'Subscription', 'Infra', 'Trading Group', 'Other']
 const initialMarketStatus: MarketStatus = { loading: true, error: '', assets: [], updatedAt: '' }
 const initialSodexState: SodexState = { loading: true, error: '', tickers: [], updatedAt: '' }
+const initialIndexState: IndexState = { loading: true, error: '', indexes: [], updatedAt: '' }
+const initialCloudState: CloudState = { loading: false, message: 'Local workspace' }
+const stableTokens = new Set(['USDC', 'USDT'])
+const sodexSymbolsByToken: Partial<Record<string, string>> = {
+  BNB: 'vBNB_vUSDC',
+  BTC: 'vBTC_vUSDC',
+  ETH: 'vETH_vUSDC',
+  SOL: 'vSOL_vUSDC',
+}
+const defaultSodexSymbols = Object.values(sodexSymbolsByToken).join(',')
 
 function readString(record: SodexTicker, keys: string[]): string {
   for (const key of keys) {
@@ -91,6 +127,118 @@ function readNumber(record: SodexTicker, keys: string[]): number | undefined {
   return undefined
 }
 
+function formatPercent(value: number | undefined, options: { ratio?: boolean } = {}): string {
+  if (value === undefined) {
+    return 'Awaiting signal'
+  }
+
+  const normalizedValue = options.ratio ? value * 100 : value
+  return `${normalizedValue >= 0 ? '+' : ''}${normalizedValue.toFixed(2)}%`
+}
+
+function isStableToken(symbol: string): boolean {
+  return stableTokens.has(symbol.toUpperCase())
+}
+
+function getMarketSourceLabel(asset: MarketAsset): string {
+  if (asset.source === 'sosovalue') {
+    return asset.resolvedSymbol && asset.resolvedSymbol.toUpperCase() !== asset.symbol.toUpperCase()
+      ? `SoSoValue ${asset.resolvedSymbol.toUpperCase()}`
+      : 'SoSoValue'
+  }
+
+  if (asset.source === 'sodex') {
+    return 'SoDEX fallback'
+  }
+
+  if (asset.source === 'stablecoin') {
+    return 'Stable reference'
+  }
+
+  return 'Missing'
+}
+
+function getMarketStatusCopy(market: MarketStatus): string {
+  if (market.error) {
+    return 'Needs attention'
+  }
+
+  if (market.source === 'sosovalue') {
+    return 'SoSoValue live'
+  }
+
+  if (market.source === 'mixed') {
+    return 'Mixed sources'
+  }
+
+  if (market.source === 'fallback') {
+    return 'Fallback pricing'
+  }
+
+  return market.loading ? 'Syncing' : 'Ready'
+}
+
+function parsePositiveInput(value: string, label: string): number {
+  const amount = Number(value)
+
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error(`Enter a positive ${label}.`)
+  }
+
+  return amount
+}
+
+function normalizeWalletChainId(chainIdValue: unknown): number {
+  if (typeof chainIdValue === 'string') {
+    return chainIdValue.startsWith('0x') ? Number.parseInt(chainIdValue, 16) : Number(chainIdValue)
+  }
+
+  return typeof chainIdValue === 'number' ? chainIdValue : 0
+}
+
+function normalizeSodexToken(token: string): string {
+  return token.toUpperCase().replace(/^V/, '')
+}
+
+function findSodexTickerForToken(tickers: SodexTicker[], token: string): SodexTicker | undefined {
+  const normalizedToken = token.toUpperCase()
+
+  return tickers.find((ticker) => {
+    const symbol = readString(ticker, ['symbol', 's']).toUpperCase()
+    const [baseToken] = symbol.split('_')
+    return normalizeSodexToken(baseToken ?? '') === normalizedToken
+  })
+}
+
+function getIndexSignal(index: IndexSnapshot | undefined): { label: string; value?: number } {
+  if (!index) {
+    return { label: 'SSI' }
+  }
+
+  if (index.changePct24h !== undefined) {
+    return { label: '24h', value: index.changePct24h }
+  }
+
+  if (index.roi7d !== undefined) {
+    return { label: '7d', value: index.roi7d }
+  }
+
+  if (index.roi1m !== undefined) {
+    return { label: '1m', value: index.roi1m }
+  }
+
+  if (index.ytd !== undefined) {
+    return { label: 'YTD', value: index.ytd }
+  }
+
+  return { label: 'SSI' }
+}
+
+function formatIndexSignal(index: IndexSnapshot | undefined): string {
+  const signal = getIndexSignal(index)
+  return `${formatPercent(signal.value, { ratio: true })} ${signal.label}`
+}
+
 function App() {
   const [members, setMembers] = usePersistentState<Member[]>('splitchain:members', [])
   const [groups, setGroups] = usePersistentState<Group[]>('splitchain:groups', [])
@@ -100,6 +248,8 @@ function App() {
   const [wallet, setWallet] = useState<WalletState | null>(null)
   const [market, setMarket] = useState<MarketStatus>(initialMarketStatus)
   const [sodex, setSodex] = useState<SodexState>(initialSodexState)
+  const [indexes, setIndexes] = useState<IndexState>(initialIndexState)
+  const [cloud, setCloud] = useState<CloudState>(initialCloudState)
   const [notice, setNotice] = useState<Notice>({ type: 'info', message: 'Ready to create your first crypto split.' })
   const [memberForm, setMemberForm] = useState({ name: '', wallet: '' })
   const [groupForm, setGroupForm] = useState({ name: '', chainId: 8453, settlementToken: 'USDC' })
@@ -117,6 +267,8 @@ function App() {
   const [settlementChainId, setSettlementChainId] = useState(8453)
   const [settlementToken, setSettlementToken] = useState('USDC')
   const [payingTransfer, setPayingTransfer] = useState('')
+  const importInputRef = useRef<HTMLInputElement | null>(null)
+  const groupSelectionHydratedRef = useRef(false)
 
   const activeGroup = groups.find((group) => group.id === selectedGroupId) ?? groups[0]
   const activeMembers = useMemo(() => getMembersForGroup(activeGroup, members), [activeGroup, members])
@@ -140,7 +292,7 @@ function App() {
   const optimizedTransfers = useMemo(() => simplifyDebts(balances), [balances])
   const rawTransferCount = useMemo(() => getRawTransferCount(activeGroup, activeExpenses), [activeGroup, activeExpenses])
   const totalUsd = useMemo(
-    () => activeExpenses.reduce((sum, expense) => sum + toUsd(expense.amount, expense.token, market.assets), 0),
+    () => activeExpenses.reduce((sum, expense) => sum + getExpenseAmountUsd(expense, market.assets), 0),
     [activeExpenses, market.assets],
   )
   const walletMember = useMemo(
@@ -157,25 +309,103 @@ function App() {
   }, [activeExpenses])
   const categoryTotals = useMemo(() => {
     return activeExpenses.reduce<Record<string, number>>((totals, expense) => {
-      totals[expense.category] = (totals[expense.category] ?? 0) + toUsd(expense.amount, expense.token, market.assets)
+      totals[expense.category] = (totals[expense.category] ?? 0) + getExpenseAmountUsd(expense, market.assets)
       return totals
     }, {})
   }, [activeExpenses, market.assets])
   const largestPayer = useMemo(() => {
     const paidByMember = activeExpenses.reduce<Record<string, number>>((totals, expense) => {
-      totals[expense.payerId] = (totals[expense.payerId] ?? 0) + toUsd(expense.amount, expense.token, market.assets)
+      totals[expense.payerId] = (totals[expense.payerId] ?? 0) + getExpenseAmountUsd(expense, market.assets)
       return totals
     }, {})
     const [memberId, amount] = Object.entries(paidByMember).sort((a, b) => b[1] - a[1])[0] ?? []
     return memberId ? { name: memberName(memberId, members), amount } : null
   }, [activeExpenses, market.assets, members])
+  const workspacePayload = useMemo<WorkspacePayload>(() => ({
+    members,
+    groups,
+    expenses,
+    settlements,
+    selectedGroupId,
+  }), [expenses, groups, members, selectedGroupId, settlements])
+  const primaryIndex = useMemo(
+    () => indexes.indexes.find((index) => index.source === 'sosovalue-index') ?? indexes.indexes[0],
+    [indexes.indexes],
+  )
+  const sodexSettlementTicker = useMemo(
+    () => findSodexTickerForToken(sodex.tickers, settlementToken),
+    [settlementToken, sodex.tickers],
+  )
+  const settlementRecommendation = useMemo(() => {
+    const chain = getChain(settlementChainId)
+    const selectedTokenPrice = getTokenPrice(market.assets, settlementToken)
+    const selectedTokenAsset = getAsset(market.assets, settlementToken)
+    const indexSignal = getIndexSignal(primaryIndex)
+    const tokenMove = selectedTokenAsset?.changePct24h
+    const priceSource = selectedTokenAsset ? getMarketSourceLabel(selectedTokenAsset) : 'Live market'
+    const stableToken = supportedSettlementTokens.find((token) => token === 'USDC') ?? supportedSettlementTokens.find(isStableToken) ?? settlementToken
+    const hasVolatileExposure = Object.keys(tokenExposure).some((token) => !isStableToken(token))
+    const sodexSymbol = sodexSettlementTicker ? readString(sodexSettlementTicker, ['symbol', 's']) : ''
+
+    if (!selectedTokenPrice) {
+      return {
+        token: stableToken,
+        title: `Use ${stableToken} once pricing is live`,
+        detail: 'Live pricing is required before SplitChain converts USD balances into token settlement amounts.',
+        shortReason: 'Waiting for live price',
+      }
+    }
+
+    if (isStableToken(settlementToken)) {
+      return {
+        token: settlementToken,
+        title: `${settlementToken} on ${chain.shortName} is the clean route`,
+        detail: hasVolatileExposure
+          ? `Stable settlement keeps the debt graph fixed while SSI ${indexSignal.label} reads ${formatPercent(indexSignal.value, { ratio: true })}.`
+          : `Stable balances are already aligned with ${chain.name} settlement using ${priceSource}.`,
+        shortReason: sodexSymbol ? `SoDEX ${sodexSymbol}` : 'Stable settlement',
+      }
+    }
+
+    if ((indexSignal.value !== undefined && indexSignal.value < -0.01) || (tokenMove !== undefined && Math.abs(tokenMove) > 2)) {
+      return {
+        token: stableToken,
+        title: `Prefer ${stableToken} for this settlement`,
+        detail: `${settlementToken} is moving ${formatPercent(tokenMove)} while SSI ${indexSignal.label} reads ${formatPercent(indexSignal.value, { ratio: true })}; stable settlement reduces drift between friends.`,
+        shortReason: 'Market drift guard',
+      }
+    }
+
+    return {
+      token: settlementToken,
+      title: `${settlementToken} is acceptable now`,
+      detail: sodexSymbol
+        ? `SoDEX has a live ${sodexSymbol} ticker and ${priceSource} pricing is available for conversion.`
+        : `${priceSource} pricing is available; switch to a stable token if the group wants less volatility.`,
+      shortReason: 'Live route',
+    }
+  }, [
+    market.assets,
+    primaryIndex,
+    settlementChainId,
+    settlementToken,
+    sodexSettlementTicker,
+    supportedSettlementTokens,
+    tokenExposure,
+  ])
 
   const refreshMarket = useCallback(async () => {
     setMarket((current) => ({ ...current, loading: true, error: '' }))
 
     try {
       const response = await fetch(`/api/market/assets?symbols=${encodeURIComponent(marketSymbols)}`)
-      const payload = (await response.json()) as { assets?: MarketAsset[]; error?: string }
+      const payload = (await response.json()) as {
+        assets?: MarketAsset[]
+        fallbackReason?: string
+        source?: MarketStatus['source']
+        updatedAt?: string
+        error?: string
+      }
 
       if (!response.ok || !payload.assets) {
         throw new Error(payload.error ?? 'Unable to load market data.')
@@ -185,7 +415,9 @@ function App() {
         loading: false,
         error: '',
         assets: payload.assets,
-        updatedAt: new Date().toISOString(),
+        fallbackReason: payload.fallbackReason,
+        source: payload.source,
+        updatedAt: payload.updatedAt ?? new Date().toISOString(),
       })
     } catch (error) {
       setMarket((current) => ({
@@ -200,7 +432,7 @@ function App() {
     setSodex((current) => ({ ...current, loading: true, error: '' }))
 
     try {
-      const response = await fetch('/api/sodex/tickers')
+      const response = await fetch(`/api/sodex/tickers?symbols=${encodeURIComponent(defaultSodexSymbols)}`)
       const payload = (await response.json()) as { tickers?: SodexTicker[]; updatedAt?: string; error?: string }
 
       if (!response.ok || !payload.tickers) {
@@ -222,6 +454,32 @@ function App() {
     }
   }, [])
 
+  const refreshIndexes = useCallback(async () => {
+    setIndexes((current) => ({ ...current, loading: true, error: '' }))
+
+    try {
+      const response = await fetch('/api/market/indexes?tickers=ssimag7,ssilayer1')
+      const payload = (await response.json()) as { indexes?: IndexSnapshot[]; updatedAt?: string; error?: string }
+
+      if (!response.ok || !payload.indexes) {
+        throw new Error(payload.error ?? 'Unable to load SoSoValue Index context.')
+      }
+
+      setIndexes({
+        loading: false,
+        error: '',
+        indexes: payload.indexes,
+        updatedAt: payload.updatedAt ?? new Date().toISOString(),
+      })
+    } catch (error) {
+      setIndexes((current) => ({
+        ...current,
+        loading: false,
+        error: error instanceof Error ? error.message : 'Unable to load SoSoValue Index context.',
+      }))
+    }
+  }, [])
+
   useEffect(() => {
     refreshMarket()
     const refreshTimer = window.setInterval(refreshMarket, 30_000)
@@ -231,6 +489,12 @@ function App() {
   useEffect(() => {
     refreshSodex()
   }, [refreshSodex])
+
+  useEffect(() => {
+    refreshIndexes()
+    const refreshTimer = window.setInterval(refreshIndexes, 60_000)
+    return () => window.clearInterval(refreshTimer)
+  }, [refreshIndexes])
 
   useEffect(() => {
     getWalletState()
@@ -247,7 +511,7 @@ function App() {
       return undefined
     }
 
-    const handleAccountsChanged = (accountsValue: unknown) => {
+    const handleAccountsChanged = async (accountsValue: unknown) => {
       const accounts = Array.isArray(accountsValue) ? accountsValue : []
       const account = typeof accounts[0] === 'string' ? accounts[0] : ''
 
@@ -256,10 +520,15 @@ function App() {
         return
       }
 
-      setWallet((current) => ({ account, chainId: current?.chainId ?? 0 }))
+      try {
+        const chainId = normalizeWalletChainId(await provider.request({ method: 'eth_chainId' }))
+        setWallet({ account, chainId })
+      } catch {
+        setWallet((current) => ({ account, chainId: current?.chainId ?? 0 }))
+      }
     }
     const handleChainChanged = (chainIdValue: unknown) => {
-      const chainId = typeof chainIdValue === 'string' ? Number.parseInt(chainIdValue, 16) : Number(chainIdValue)
+      const chainId = normalizeWalletChainId(chainIdValue)
       setWallet((current) => (current ? { ...current, chainId } : current))
     }
 
@@ -273,16 +542,34 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!selectedGroupId && groups[0]) {
+    if (groups.length === 0) {
+      if (selectedGroupId) {
+        setSelectedGroupId('')
+      }
+      return
+    }
+
+    if (!groups.some((group) => group.id === selectedGroupId)) {
       setSelectedGroupId(groups[0].id)
     }
   }, [groups, selectedGroupId, setSelectedGroupId])
 
   useEffect(() => {
-    if (members.length > 0 && groupMemberIds.length === 0) {
-      setGroupMemberIds(members.map((member) => member.id))
+    if (groupSelectionHydratedRef.current) {
+      setGroupMemberIds((current) => current.filter((memberId) => members.some((member) => member.id === memberId)))
+      return
     }
-  }, [groupMemberIds.length, members])
+
+    groupSelectionHydratedRef.current = true
+
+    if (members.length > 0) {
+      setGroupMemberIds((current) => (
+        current.length > 0
+          ? current.filter((memberId) => members.some((member) => member.id === memberId))
+          : members.map((member) => member.id)
+      ))
+    }
+  }, [members])
 
   useEffect(() => {
     const supportedTokens = getSupportedSettlementTokens(groupForm.chainId)
@@ -334,6 +621,223 @@ function App() {
 
   function showNotice(type: Notice['type'], message: string) {
     setNotice({ type, message })
+  }
+
+  function applyWorkspacePayload(payload: WorkspacePayload) {
+    const nextGroup = payload.groups.find((group) => group.id === payload.selectedGroupId) ?? payload.groups[0]
+
+    setMembers(payload.members)
+    setGroups(payload.groups)
+    setExpenses(payload.expenses)
+    setSettlements(payload.settlements)
+    setSelectedGroupId(nextGroup?.id ?? '')
+    setGroupMemberIds(nextGroup?.memberIds ?? payload.members.map((member) => member.id))
+  }
+
+  function loadDemoWorkspace() {
+    if ((members.length > 0 || groups.length > 0 || expenses.length > 0 || settlements.length > 0) && !window.confirm('Load the three-wallet demo and replace the current local workspace?')) {
+      return
+    }
+
+    const createdAt = new Date().toISOString()
+    const demoMembers: Member[] = [
+      { id: 'demo-member-aman', name: 'Aman', wallet: '0xF39Fd6e51aad88F6F4ce6aB8827279cffFb92266' },
+      { id: 'demo-member-maya', name: 'Maya', wallet: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8' },
+      { id: 'demo-member-lee', name: 'Lee', wallet: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC' },
+    ]
+    const demoGroup: Group = {
+      id: 'demo-group-base-trip',
+      name: 'Base builders weekend',
+      chainId: 8453,
+      settlementToken: 'USDC',
+      memberIds: demoMembers.map((member) => member.id),
+      createdAt,
+    }
+    const demoExpenses: Expense[] = [
+      {
+        id: 'demo-expense-hotel',
+        groupId: demoGroup.id,
+        title: 'Hotel booking',
+        category: 'Travel',
+        amount: 600,
+        token: 'USDC',
+        priceUsd: 1,
+        amountUsd: 600,
+        payerId: demoMembers[0].id,
+        splitMode: 'equal',
+        shares: {
+          [demoMembers[0].id]: 200,
+          [demoMembers[1].id]: 200,
+          [demoMembers[2].id]: 200,
+        },
+        sharesUsd: {
+          [demoMembers[0].id]: 200,
+          [demoMembers[1].id]: 200,
+          [demoMembers[2].id]: 200,
+        },
+        pricedAt: createdAt,
+        priceSource: 'stablecoin',
+        createdAt,
+      },
+      {
+        id: 'demo-expense-infra',
+        groupId: demoGroup.id,
+        title: 'RPC and AI credits',
+        category: 'Infra',
+        amount: 240,
+        token: 'USDC',
+        priceUsd: 1,
+        amountUsd: 240,
+        payerId: demoMembers[1].id,
+        splitMode: 'percentage',
+        shares: {
+          [demoMembers[0].id]: 72,
+          [demoMembers[1].id]: 96,
+          [demoMembers[2].id]: 72,
+        },
+        sharesUsd: {
+          [demoMembers[0].id]: 72,
+          [demoMembers[1].id]: 96,
+          [demoMembers[2].id]: 72,
+        },
+        pricedAt: createdAt,
+        priceSource: 'stablecoin',
+        createdAt,
+      },
+      {
+        id: 'demo-expense-dinner',
+        groupId: demoGroup.id,
+        title: 'Team dinner',
+        category: 'DAO Ops',
+        amount: 180,
+        token: 'USDC',
+        priceUsd: 1,
+        amountUsd: 180,
+        payerId: demoMembers[2].id,
+        splitMode: 'custom',
+        shares: {
+          [demoMembers[0].id]: 70,
+          [demoMembers[1].id]: 60,
+          [demoMembers[2].id]: 50,
+        },
+        sharesUsd: {
+          [demoMembers[0].id]: 70,
+          [demoMembers[1].id]: 60,
+          [demoMembers[2].id]: 50,
+        },
+        pricedAt: createdAt,
+        priceSource: 'stablecoin',
+        createdAt,
+      },
+    ]
+
+    applyWorkspacePayload({
+      members: demoMembers,
+      groups: [demoGroup],
+      expenses: demoExpenses,
+      settlements: [],
+      selectedGroupId: demoGroup.id,
+    })
+    setSettlementChainId(demoGroup.chainId)
+    setSettlementToken(demoGroup.settlementToken)
+    setExpenseForm((current) => ({
+      ...current,
+      amount: '',
+      payerId: demoMembers[0].id,
+      title: '',
+      token: demoGroup.settlementToken,
+    }))
+    showNotice('success', 'Three-wallet demo loaded with a shared expense graph ready to settle.')
+  }
+
+  async function handleSaveCloudWorkspace() {
+    try {
+      if (!wallet) {
+        throw new Error('Connect a wallet before saving a cloud workspace.')
+      }
+
+      setCloud({ loading: true, message: 'Signing save...' })
+      const payloadToSave = normalizeWorkspacePayload(workspacePayload)
+      const authHeaders = await signWorkspaceRequest({
+        owner: wallet.account,
+        operation: 'save',
+        payload: payloadToSave,
+      })
+      setCloud({ loading: true, message: 'Saving...' })
+      const response = await fetch(`/api/workspace?owner=${encodeURIComponent(wallet.account)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders },
+        body: JSON.stringify({ payload: payloadToSave }),
+      })
+      const payload = (await response.json()) as {
+        configured?: boolean
+        workspace?: { updatedAt?: string }
+        error?: string
+      }
+
+      if (!response.ok) {
+        throw new Error(payload.error ?? 'Cloud workspace save failed.')
+      }
+
+      if (payload.configured === false) {
+        throw new Error('Supabase persistence is not configured on this deployment.')
+      }
+
+      const updatedAt = payload.workspace?.updatedAt ? new Date(payload.workspace.updatedAt).toLocaleTimeString() : 'now'
+      setCloud({ loading: false, message: `Saved ${updatedAt}` })
+      showNotice('success', 'Workspace saved to Supabase.')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Cloud workspace save failed.'
+      setCloud({ loading: false, message })
+      showNotice('error', message)
+    }
+  }
+
+  async function handleLoadCloudWorkspace() {
+    try {
+      if (!wallet) {
+        throw new Error('Connect a wallet before loading a cloud workspace.')
+      }
+
+      setCloud({ loading: true, message: 'Signing load...' })
+      const authHeaders = await signWorkspaceRequest({
+        owner: wallet.account,
+        operation: 'load',
+      })
+      setCloud({ loading: true, message: 'Loading...' })
+      const response = await fetch(`/api/workspace?owner=${encodeURIComponent(wallet.account)}`, {
+        headers: authHeaders,
+      })
+      const payload = (await response.json()) as {
+        configured?: boolean
+        workspace?: { payload?: unknown; updatedAt?: string }
+        error?: string
+      }
+
+      if (!response.ok) {
+        throw new Error(payload.error ?? 'Cloud workspace load failed.')
+      }
+
+      if (payload.configured === false) {
+        throw new Error('Supabase persistence is not configured on this deployment.')
+      }
+
+      if (!payload.workspace?.payload) {
+        setCloud({ loading: false, message: 'No cloud workspace' })
+        showNotice('info', 'No Supabase workspace exists for this wallet yet.')
+        return
+      }
+
+      const nextWorkspace = normalizeWorkspacePayload(payload.workspace.payload)
+      applyWorkspacePayload(nextWorkspace)
+      const updatedAt = payload.workspace.updatedAt ? new Date(payload.workspace.updatedAt).toLocaleTimeString() : 'now'
+      setCloud({ loading: false, message: `Loaded ${updatedAt}` })
+      showNotice('success', 'Workspace loaded from Supabase.')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Cloud workspace load failed.'
+      setCloud({ loading: false, message })
+      showNotice('error', message)
+    }
   }
 
   async function handleConnectWallet() {
@@ -460,6 +964,11 @@ function App() {
 
     if (expenseForm.splitMode === 'percentage') {
       const percentages = memberIds.map((memberId) => Number(percentageShares[memberId] || 0))
+
+      if (percentages.some((percent) => !Number.isFinite(percent) || percent < 0)) {
+        throw new Error('Percentage splits must be valid non-negative numbers.')
+      }
+
       const totalPercent = percentages.reduce((sum, percent) => sum + percent, 0)
 
       if (Math.abs(totalPercent - 100) > 0.1) {
@@ -473,6 +982,11 @@ function App() {
     }
 
     const customValues = memberIds.map((memberId) => Number(customShares[memberId] || 0))
+
+    if (customValues.some((value) => !Number.isFinite(value) || value < 0)) {
+      throw new Error('Custom splits must be valid non-negative amounts.')
+    }
+
     const totalCustom = customValues.reduce((sum, value) => sum + value, 0)
 
     if (Math.abs(totalCustom - amount) > 0.01) {
@@ -493,21 +1007,32 @@ function App() {
         throw new Error('Create or select a group before adding an expense.')
       }
 
-      const amount = Number(expenseForm.amount)
+      const amount = parsePositiveInput(expenseForm.amount, 'expense amount')
 
       if (!expenseForm.title.trim()) {
         throw new Error('Add an expense title.')
-      }
-
-      if (!amount || amount <= 0) {
-        throw new Error('Enter a positive expense amount.')
       }
 
       if (!expenseForm.payerId) {
         throw new Error('Choose who paid.')
       }
 
+      if (!activeGroup.memberIds.includes(expenseForm.payerId)) {
+        throw new Error('Choose a payer from the active group.')
+      }
+
+      const priceUsd = getTokenPrice(market.assets, expenseForm.token)
+
+      if (!priceUsd || !Number.isFinite(priceUsd)) {
+        throw new Error(`No live USD price is available for ${expenseForm.token}. Refresh market data before adding this expense.`)
+      }
+
       const shares = buildExpenseShares(amount)
+      const amountUsd = Number((amount * priceUsd).toFixed(8))
+      const sharesUsd = Object.fromEntries(
+        Object.entries(shares).map(([memberId, shareAmount]) => [memberId, Number((shareAmount * priceUsd).toFixed(8))]),
+      )
+      const priceAsset = getAsset(market.assets, expenseForm.token)
       const expense: Expense = {
         id: makeId('expense'),
         groupId: activeGroup.id,
@@ -515,6 +1040,11 @@ function App() {
         category: expenseForm.category,
         amount,
         token: expenseForm.token,
+        priceUsd,
+        amountUsd,
+        sharesUsd,
+        pricedAt: priceAsset?.updatedAt ?? new Date().toISOString(),
+        priceSource: priceAsset?.source ?? (isStableToken(expenseForm.token) ? 'stablecoin' : undefined),
         payerId: expenseForm.payerId,
         splitMode: expenseForm.splitMode,
         shares,
@@ -540,6 +1070,10 @@ function App() {
         throw new Error('This settlement is missing group member data.')
       }
 
+      if (!Number.isFinite(transfer.amountUsd) || transfer.amountUsd <= 0) {
+        throw new Error('This settlement amount is invalid.')
+      }
+
       if (!wallet) {
         throw new Error('Connect the debtor wallet before sending settlement.')
       }
@@ -552,18 +1086,22 @@ function App() {
         throw new Error(`${toMember.name} does not have a valid EVM settlement wallet.`)
       }
 
-      if (!price) {
+      if (!getSupportedSettlementTokens(settlementChainId).includes(settlementToken)) {
+        throw new Error(`${settlementToken} is not supported on ${getChain(settlementChainId).name}.`)
+      }
+
+      if (!price || !Number.isFinite(price)) {
         throw new Error(`No live USD price is available for ${settlementToken}. Refresh market data or choose another token.`)
       }
 
       const tokenAmount = Number((transfer.amountUsd / price).toFixed(8))
 
-      if (tokenAmount <= 0) {
+      if (!Number.isFinite(tokenAmount) || tokenAmount <= 0) {
         throw new Error('Settlement amount is too small to send.')
       }
 
       setPayingTransfer(transferKey)
-      const txHash = await sendSettlementTransaction({
+      const transaction = await sendSettlementTransaction({
         from: wallet.account,
         to: toMember.wallet,
         amount: tokenAmount,
@@ -571,6 +1109,7 @@ function App() {
         chainId: settlementChainId,
       })
 
+      const createdAt = new Date().toISOString()
       const settlement: SettlementRecord = {
         id: makeId('settlement'),
         groupId: activeGroup.id,
@@ -580,13 +1119,73 @@ function App() {
         token: settlementToken,
         tokenAmount,
         chainId: settlementChainId,
-        txHash,
-        createdAt: new Date().toISOString(),
-        status: 'sent',
+        txHash: transaction.hash,
+        transferType: transaction.transferType,
+        tokenContract: transaction.tokenContract,
+        createdAt,
+        status: 'pending',
       }
 
       setSettlements((current) => [settlement, ...current])
-      showNotice('success', `Settlement sent: ${shortAddress(txHash)}`)
+      showNotice('info', `Transaction submitted: ${shortAddress(transaction.hash)}. Waiting for confirmation.`)
+
+      try {
+        const confirmation = await waitForTransactionConfirmation(transaction.hash)
+
+        if (confirmation.status === 'confirmed') {
+          setSettlements((current) => current.map((record) => (
+            record.id === settlement.id
+              ? {
+                  ...record,
+                  blockNumber: confirmation.blockNumber,
+                  confirmedAt: new Date().toISOString(),
+                  status: 'confirmed',
+                }
+              : record
+          )))
+          showNotice('success', `Settlement confirmed: ${shortAddress(transaction.hash)}`)
+          return
+        }
+
+        if (confirmation.status === 'failed') {
+          setSettlements((current) => current.map((record) => (
+            record.id === settlement.id
+              ? {
+                  ...record,
+                  blockNumber: confirmation.blockNumber,
+                  failedAt: new Date().toISOString(),
+                  failureReason: confirmation.failureReason,
+                  status: 'failed',
+                }
+              : record
+          )))
+          showNotice('error', `Settlement transaction failed: ${shortAddress(transaction.hash)}`)
+          return
+        }
+
+        setSettlements((current) => current.map((record) => (
+          record.id === settlement.id
+            ? {
+                ...record,
+                failureReason: confirmation.failureReason,
+              }
+            : record
+        )))
+        showNotice('info', `Transaction submitted but still pending: ${shortAddress(transaction.hash)}`)
+      } catch (confirmationError) {
+        const confirmationMessage = confirmationError instanceof Error
+          ? confirmationError.message
+          : 'Unable to verify settlement confirmation.'
+        setSettlements((current) => current.map((record) => (
+          record.id === settlement.id
+            ? {
+                ...record,
+                failureReason: confirmationMessage,
+              }
+            : record
+        )))
+        showNotice('info', `Transaction submitted; confirmation check needs retry: ${shortAddress(transaction.hash)}`)
+      }
     } catch (error) {
       showNotice('error', error instanceof Error ? error.message : 'Settlement failed.')
     } finally {
@@ -595,14 +1194,35 @@ function App() {
   }
 
   function exportWorkspace() {
-    const payload = JSON.stringify({ members, groups, expenses, settlements }, null, 2)
-    const blob = new Blob([payload], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const anchor = document.createElement('a')
-    anchor.href = url
-    anchor.download = `splitchain-export-${new Date().toISOString().slice(0, 10)}.json`
-    anchor.click()
-    URL.revokeObjectURL(url)
+    try {
+      const payload = JSON.stringify(normalizeWorkspacePayload(workspacePayload), null, 2)
+      const blob = new Blob([payload], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `splitchain-export-${new Date().toISOString().slice(0, 10)}.json`
+      anchor.click()
+      URL.revokeObjectURL(url)
+    } catch (error) {
+      showNotice('error', error instanceof Error ? error.message : 'Workspace export failed.')
+    }
+  }
+
+  async function handleImportWorkspace(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+
+    if (!file) {
+      return
+    }
+
+    try {
+      const payload = normalizeWorkspacePayload(JSON.parse(await file.text()))
+      applyWorkspacePayload(payload)
+      showNotice('success', 'Workspace import completed.')
+    } catch (error) {
+      showNotice('error', error instanceof Error ? error.message : 'Workspace import failed.')
+    }
   }
 
   function clearWorkspace() {
@@ -620,6 +1240,9 @@ function App() {
   const compressionText = rawTransferCount > 0
     ? `${Math.max(rawTransferCount - optimizedTransfers.length, 0)} fewer payments`
     : 'No payment graph yet'
+  const settlementChain = getChain(settlementChainId)
+  const usesNativeSettlement = isNativeSettlementToken(settlementChainId, settlementToken)
+  const settlementTokenContract = settlementChain.tokenContracts[settlementToken]?.address
 
   return (
     <main className="app-shell">
@@ -665,6 +1288,10 @@ function App() {
               <UserPlus size={18} />
               Add connected wallet
             </button>
+            <button className="secondary-action" type="button" onClick={loadDemoWorkspace}>
+              <Layers3 size={18} />
+              Load 3-wallet demo
+            </button>
           </div>
           <div className="market-rail" aria-label="Live market data">
             {market.loading ? (
@@ -679,6 +1306,7 @@ function App() {
                 <span className="market-chip" key={asset.symbol}>
                   {asset.symbol}
                   <strong>{asset.price ? formatUsd(asset.price) : 'Live soon'}</strong>
+                  <small>{getMarketSourceLabel(asset)}</small>
                 </span>
               ))
             )}
@@ -980,6 +1608,36 @@ function App() {
               </label>
             </div>
 
+            <div className="recommendation-card">
+              <span>Smart settlement route</span>
+              <strong>{settlementRecommendation.title}</strong>
+              <small>{settlementRecommendation.detail}</small>
+              <div className="recommendation-meta">
+                <span>{primaryIndex ? `${primaryIndex.ticker.toUpperCase()} ${formatIndexSignal(primaryIndex)}` : 'SSI index loading'}</span>
+                <span>
+                  {sodexSettlementTicker
+                    ? `SoDEX ${readString(sodexSettlementTicker, ['symbol', 's'])}`
+                    : isStableToken(settlementToken)
+                      ? 'Stable token route'
+                      : 'No exact SoDEX pair'}
+                </span>
+              </div>
+            </div>
+
+            <div className="settlement-proof">
+              <span>{usesNativeSettlement ? 'Native transfer' : 'Direct ERC-20 transfer'}</span>
+              <strong>
+                {usesNativeSettlement
+                  ? `${settlementToken} wallet transaction`
+                  : `${settlementToken} transfer() call`}
+              </strong>
+              <small>
+                {usesNativeSettlement
+                  ? `${settlementChain.name} sends value directly from debtor to creditor.`
+                  : `Wallet signs a direct ERC-20 transfer(); no approve() call or SplitChain allowance spender is created${settlementTokenContract ? ` (${shortAddress(settlementTokenContract)})` : ''}.`}
+              </small>
+            </div>
+
             {optimizedTransfers.length === 0 ? (
               <p className="empty-copy">There is nothing to settle for the selected group.</p>
             ) : (
@@ -990,6 +1648,12 @@ function App() {
                 const tokenAmount = price ? transfer.amountUsd / price : 0
                 const transferKey = `${transfer.fromId}:${transfer.toId}:${transfer.amountUsd}`
                 const walletMatches = Boolean(wallet && fromMember && wallet.account.toLowerCase() === fromMember.wallet.toLowerCase())
+                const hasPendingSettlement = activeSettlements.some((settlement) => (
+                  settlement.status === 'pending' &&
+                  settlement.fromId === transfer.fromId &&
+                  settlement.toId === transfer.toId &&
+                  Math.abs(settlement.amountUsd - transfer.amountUsd) < 0.01
+                ))
 
                 return (
                   <div className="pay-row" key={transferKey}>
@@ -997,9 +1661,9 @@ function App() {
                       <span>{fromMember?.name ?? 'Member'} pays {toMember?.name ?? 'member'}</span>
                       <small>{price ? formatToken(tokenAmount, settlementToken) : 'Waiting for live token price'} on {getChain(settlementChainId).name}</small>
                     </div>
-                    <button disabled={!walletMatches || !price || payingTransfer === transferKey} type="button" onClick={() => handlePayTransfer(transfer)}>
+                    <button disabled={!walletMatches || !price || payingTransfer === transferKey || hasPendingSettlement} type="button" onClick={() => handlePayTransfer(transfer)}>
                       {payingTransfer === transferKey ? <Loader2 size={16} className="spin" /> : <Send size={16} />}
-                      Pay now
+                      {hasPendingSettlement ? 'Pending' : 'Pay now'}
                     </button>
                   </div>
                 )
@@ -1021,7 +1685,9 @@ function App() {
                     rel="noreferrer"
                   >
                     <span>{formatToken(settlement.tokenAmount, settlement.token)}</span>
-                    <small>{shortAddress(settlement.txHash)}</small>
+                    <small>
+                      {getChain(settlement.chainId).shortName} · {settlement.status === 'sent' ? 'confirmed' : settlement.status} · {settlement.transferType ?? 'tx'} · {shortAddress(settlement.txHash)}
+                    </small>
                   </a>
                 ))}
               </div>
@@ -1088,6 +1754,16 @@ function App() {
             <strong>{wallet ? getChain(wallet.chainId).name : 'No wallet'}</strong>
             <small>{wallet ? shortAddress(wallet.account) : 'Connect to settle'}</small>
           </div>
+          <div className="analytics-block">
+            <span>SSI index</span>
+            <strong>{primaryIndex ? primaryIndex.ticker.toUpperCase() : 'Loading'}</strong>
+            <small>{primaryIndex ? `${formatIndexSignal(primaryIndex)} context` : 'SoSoValue Indexes'}</small>
+          </div>
+          <div className="analytics-block">
+            <span>Settlement guard</span>
+            <strong>{settlementRecommendation.token}</strong>
+            <small>{settlementRecommendation.shortReason}</small>
+          </div>
         </div>
 
         <div className="insight-columns">
@@ -1121,6 +1797,24 @@ function App() {
               ))
             )}
           </div>
+          <div>
+            <div className="subhead">
+              <h3>Market context</h3>
+              <span>{indexes.loading ? 'Syncing' : indexes.updatedAt ? new Date(indexes.updatedAt).toLocaleTimeString() : 'Ready'}</span>
+            </div>
+            {indexes.error ? (
+              <p className="market-error">{indexes.error}</p>
+            ) : indexes.indexes.length === 0 ? (
+              <p className="empty-copy">SoSoValue Index context is loading.</p>
+            ) : (
+              indexes.indexes.map((index) => (
+                <div className="insight-row" key={index.ticker}>
+                  <span>{index.ticker.toUpperCase()}</span>
+                  <strong>{formatIndexSignal(index)}</strong>
+                </div>
+              ))
+            )}
+          </div>
         </div>
       </section>
 
@@ -1136,13 +1830,42 @@ function App() {
           <div>
             <Database size={19} />
             <span>SoSoValue</span>
-            <strong>{market.error ? 'Needs attention' : 'Live pricing'}</strong>
+            <strong>{getMarketStatusCopy(market)}</strong>
           </div>
           <div>
             <Link2 size={19} />
             <span>SoDEX</span>
             <strong>{sodex.error ? 'Unavailable' : 'Public tickers'}</strong>
           </div>
+          <div>
+            <Gauge size={19} />
+            <span>SSI Indexes</span>
+            <strong>{indexes.error ? 'Unavailable' : 'Market context'}</strong>
+          </div>
+          <div>
+            <Database size={19} />
+            <span>Supabase</span>
+            <strong>{cloud.message}</strong>
+          </div>
+          <button type="button" onClick={handleLoadCloudWorkspace} disabled={cloud.loading}>
+            <Database size={17} />
+            Load cloud
+          </button>
+          <button type="button" onClick={handleSaveCloudWorkspace} disabled={cloud.loading}>
+            <Database size={17} />
+            Save cloud
+          </button>
+          <input
+            ref={importInputRef}
+            className="file-input"
+            type="file"
+            accept="application/json"
+            onChange={handleImportWorkspace}
+          />
+          <button type="button" onClick={() => importInputRef.current?.click()}>
+            <Upload size={17} />
+            Import workspace
+          </button>
           <button type="button" onClick={exportWorkspace}>
             <Database size={17} />
             Export workspace

@@ -205,6 +205,11 @@
   color: var(--text-strong);
 }
 
+.market-chip small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .hero-stage {
   position: relative;
   min-height: 330px;
@@ -451,8 +456,15 @@ select:focus {
 .metric-strip,
 .analytics-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
+}
+
+.metric-strip {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.analytics-grid {
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
 }
 
 .metric-strip {
@@ -491,6 +503,47 @@ select:focus {
 .insight-columns > div {
   display: grid;
   gap: 10px;
+}
+
+.recommendation-card,
+.settlement-proof {
+  display: grid;
+  gap: 6px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(37, 99, 235, 0.06);
+}
+
+.settlement-proof {
+  background: rgba(15, 143, 112, 0.07);
+}
+
+.recommendation-card span,
+.recommendation-card small,
+.settlement-proof span,
+.settlement-proof small {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.recommendation-card strong,
+.settlement-proof strong {
+  color: var(--text-strong);
+}
+
+.recommendation-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.recommendation-meta span {
+  min-height: 28px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.68);
 }
 
 .subhead {
@@ -662,6 +715,7 @@ select:focus {
 
 .settings-row {
   align-items: stretch;
+  flex-wrap: wrap;
 }
 
 .settings-row > div,
@@ -671,6 +725,7 @@ select:focus {
   align-content: center;
   justify-items: start;
   gap: 6px;
+  min-width: 160px;
   min-height: 94px;
   padding: 16px;
   border: 1px solid var(--border);
@@ -680,6 +735,10 @@ select:focus {
 
 .settings-row svg {
   color: var(--red);
+}
+
+.file-input {
+  display: none;
 }
 
 .spin {
@@ -746,7 +805,6 @@ select:focus {
   }
 
   .metric-strip,
-  .analytics-grid,
   .builder-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }

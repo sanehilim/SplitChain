@@ -50,6 +50,36 @@ export function toUsd(amount: number, symbol: string, markets: MarketAsset[]): n
   return price ? amount * price : 0
 }
 
+function readStoredUsd(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+export function getExpenseAmountUsd(expense: Expense, markets: MarketAsset[]): number {
+  const storedAmountUsd = readStoredUsd(expense.amountUsd)
+
+  if (storedAmountUsd !== undefined) {
+    return storedAmountUsd
+  }
+
+  const storedPriceUsd = readStoredUsd(expense.priceUsd)
+  return storedPriceUsd !== undefined ? expense.amount * storedPriceUsd : toUsd(expense.amount, expense.token, markets)
+}
+
+export function getExpenseShareUsd(expense: Expense, memberId: string, shareAmount: number, markets: MarketAsset[]): number {
+  const storedShareUsd = readStoredUsd(expense.sharesUsd?.[memberId])
+
+  if (storedShareUsd !== undefined) {
+    return storedShareUsd
+  }
+
+  const storedPriceUsd = readStoredUsd(expense.priceUsd)
+  return storedPriceUsd !== undefined ? shareAmount * storedPriceUsd : toUsd(shareAmount, expense.token, markets)
+}
+
+export function isBalanceSettledStatus(status: SettlementRecord['status']): boolean {
+  return status === 'confirmed' || status === 'sent'
+}
+
 export function getMembersForGroup(group: Group | undefined, members: Member[]): Member[] {
   if (!group) {
     return []
@@ -77,17 +107,17 @@ export function calculateBalances(
   expenses
     .filter((expense) => expense.groupId === group.id)
     .forEach((expense) => {
-      const totalUsd = toUsd(expense.amount, expense.token, markets)
+      const totalUsd = getExpenseAmountUsd(expense, markets)
       balances.set(expense.payerId, (balances.get(expense.payerId) ?? 0) + totalUsd)
 
       Object.entries(expense.shares).forEach(([memberId, shareAmount]) => {
-        const shareUsd = toUsd(shareAmount, expense.token, markets)
+        const shareUsd = getExpenseShareUsd(expense, memberId, shareAmount, markets)
         balances.set(memberId, (balances.get(memberId) ?? 0) - shareUsd)
       })
     })
 
   settlements
-    .filter((settlement) => settlement.groupId === group.id && settlement.status === 'sent')
+    .filter((settlement) => settlement.groupId === group.id && isBalanceSettledStatus(settlement.status))
     .forEach((settlement) => {
       balances.set(settlement.fromId, (balances.get(settlement.fromId) ?? 0) + settlement.amountUsd)
       balances.set(settlement.toId, (balances.get(settlement.toId) ?? 0) - settlement.amountUsd)

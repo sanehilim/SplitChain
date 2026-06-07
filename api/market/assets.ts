@@ -1,11 +1,12 @@
-import { getMarketAssets } from '../../server/splitchainApi.js'
+import { assertPublicApiRateLimit, getMarketAssets, PublicRateLimitError, readClientRateLimitKey } from '../../server/splitchainApi.js'
 import type { ApiRequest, ApiResponse } from '../_types.js'
 
 export default async function handler(request: ApiRequest, response: ApiResponse) {
   try {
+    assertPublicApiRateLimit('market-assets', readClientRateLimitKey(request.headers))
     response.status(200).json(await getMarketAssets(request.query.symbols))
   } catch (error) {
-    response.status(502).json({
+    response.status(error instanceof PublicRateLimitError ? error.statusCode : 502).json({
       error: error instanceof Error ? error.message : 'Unable to load SoSoValue market data.',
     })
   }

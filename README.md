@@ -1,195 +1,190 @@
 # SplitChain
 
-SplitChain is a wallet-native Web3 expense-sharing app for groups that split costs in crypto. It is the simple idea of "Splitwise for Crypto" built for friends, hackathon teams, DAO contributors, shared subscriptions, roommates, and crypto-native communities.
+SplitChain is a wallet-native crypto expense-sharing app for groups that split costs across wallets, tokens, and chains. It is a practical "Splitwise for Crypto" for hackathon teams, DAO contributors, travel groups, roommates, and crypto-native communities.
 
-The app lets users create shared groups, add wallet members, record real token expenses, calculate who owes whom, simplify debts into fewer transfers, and settle those transfers through an injected EVM wallet.
+Wave 2 turns the MVP into a more production-ready shared finance workflow: live SoSoValue pricing, SoSoValue Index context, SoDEX market signals, signed cloud persistence, locked expense pricing, transaction confirmation tracking, and tested settlement logic.
 
 ## Live App
-
-Production deployment:
 
 ```txt
 https://splitchain-blond.vercel.app
 ```
 
-## What Problem It Solves
-
-Crypto users already share payments in real life:
-
-- Friends pay for hotels, food, travel, and events in stablecoins.
-- Hackathon teams share infra, API, domain, and hosting costs.
-- DAO teams split recurring subscriptions and operational spend.
-- Trading groups and communities coordinate pooled costs.
-
-Normal expense apps are bank-first. DeFi dashboards are trader-first. SplitChain is built for the middle: social payments with crypto-native settlement.
-
-## What The App Does
+## What It Does
 
 - Creates shared crypto expense groups.
 - Adds members by EVM wallet address.
-- Records expenses in USDC, USDT, ETH, BTC, SOL, MATIC, and BNB.
-- Supports equal, percentage, and custom token splits.
-- Uses live SoSoValue market data to value token expenses in USD.
-- Calculates every member's net balance.
-- Simplifies many messy reimbursements into the fewest settlement transfers.
-- Sends real EVM wallet transactions for native-token and configured ERC-20 settlements.
-- Displays SoDEX public spot ticker data for hackathon-relevant market context.
-- Stores Wave 1 demo data locally in the browser for fast, reliable judging demos.
-- Exports workspace data as JSON.
+- Records expenses in USDC, USDT, ETH, BTC, SOL, POL, legacy MATIC, and BNB.
+- Supports equal, percentage, and custom split modes.
+- Locks USD pricing at expense creation time so balances do not drift when markets move.
+- Uses SoSoValue token market snapshots for live pricing.
+- Uses SoSoValue Indexes, including SSI indexes, for settlement context.
+- Uses exact SoDEX public spot tickers for market/liquidity signals.
+- Simplifies many reimbursement edges into fewer optimized transfers.
+- Sends native-token and direct ERC-20 `transfer()` settlement transactions.
+- Tracks submitted, confirmed, and failed settlement states from wallet receipts.
+- Supports signed Supabase workspace load/save when cloud persistence is configured.
+- Exports/imports workspaces as JSON.
+- Includes a protected three-wallet demo flow for judges.
 
-## Why It Is Useful
+## Wave 2 Upgrades
 
-SplitChain makes shared crypto payments understandable. Instead of manually calculating token values, wallet addresses, and reimbursement routes, a group can add expenses and immediately see:
+The latest production-hardening pass addressed the main judge feedback:
 
-- who paid,
-- who owes,
-- how much each person owes in USD terms,
-- which optimized transfer should happen,
-- and which wallet transaction will settle it.
-
-This creates a practical Web3 consumer workflow that is easy for judges to understand and easy for normal users to demo.
+- **ERC-20 approval gap fixed:** settlement uses direct ERC-20 `transfer()` calldata. No `approve()` call and no SplitChain allowance spender are created.
+- **Fuller on-chain proof:** settlements are recorded as `pending`, then updated to `confirmed` or `failed` after receipt polling.
+- **Cloud persistence hardened:** Supabase workspace load/save requires a fresh wallet signature from the workspace owner.
+- **Payload tamper protection:** signed cloud saves include a SHA-256 hash of the normalized workspace payload.
+- **Market source honesty:** every market asset exposes its real source: `sosovalue`, `sodex`, `stablecoin`, or `missing`.
+- **No silent fallback:** SoSoValue fallback reasons are returned by the API and shown in the app where relevant.
+- **SoDEX signal improved:** the app requests exact configured SoDEX pairs such as `vETH_vUSDC`, not random public tickers.
+- **SSI integration expanded:** SoSoValue Index snapshots are used in the smart settlement route card and analytics.
+- **POL/MATIC compatibility:** Polygon settlement now uses `POL`, while legacy `MATIC` expenses/imports still resolve through the SoSoValue POL asset.
+- **Expense valuation locked:** expense USD amounts and share USD amounts are stored at creation time.
+- **Public API protection:** market-data endpoints include request caps and lightweight in-memory rate limiting.
+- **Automated tests added:** finance, workspace, market fallback, SoDEX exact ticker, and signed Supabase save behavior are covered.
+- **Dependency audit cleaned:** `npm audit --audit-level=high` currently reports zero vulnerabilities.
 
 ## Demo Flow
 
 1. Connect an EVM wallet.
 2. Add the connected wallet as a member.
-3. Add at least one more member wallet.
-4. Create a group, for example `ETHGlobal Bangkok Trip`.
-5. Add an expense, for example `120 USDC` for `Hotel booking`.
-6. Split it equally, by percentage, or by custom amounts.
-7. View live balances and the optimized settlement graph.
-8. Connect the debtor wallet.
-9. Click `Pay now` to send the on-chain settlement transaction.
-10. SplitChain records the transaction hash in settlement history.
+3. Add at least one more member wallet, or load the three-wallet demo.
+4. Create a group and choose a settlement chain/token.
+5. Add an expense and choose equal, percentage, or custom split mode.
+6. Review optimized balances and the smart settlement route.
+7. Connect the debtor wallet.
+8. Click `Pay now`.
+9. Confirm the wallet transaction.
+10. SplitChain records the hash and updates status after receipt polling.
 
-## How It Works
+## Architecture
 
 ```txt
-React UI
-  -> Vite frontend
-  -> /api Vercel Functions or local Express API
-  -> SoSoValue market snapshots
+React + Vite UI
+  -> Vercel Functions or local Express API
+  -> SoSoValue token market snapshots
+  -> SoSoValue Index snapshots
+  -> SoDEX exact spot tickers
   -> SplitChain balance engine
   -> Debt simplification engine
   -> Injected EVM wallet
-  -> Native token or ERC-20 transfer
+  -> Native transfer or ERC-20 transfer()
+  -> Optional signed Supabase workspace persistence
 ```
+
+## Core Logic
 
 ### Expense Engine
 
-Each expense stores:
+Each expense stores the original token amount and a locked USD valuation:
 
-- group ID,
-- payer wallet member,
-- token symbol,
-- token amount,
-- category,
-- split mode,
-- and member shares.
+- `priceUsd`
+- `amountUsd`
+- `sharesUsd`
+- `pricedAt`
+- `priceSource`
 
-SplitChain converts each token amount to USD using live SoSoValue prices, credits the payer, debits each participant, and then applies completed settlements.
+This prevents old expenses from changing value when live market prices refresh.
 
 ### Debt Simplification
 
-The app separates members into creditors and debtors, then greedily matches the largest debtor to the largest creditor until the balance graph is resolved. This turns a messy group reimbursement graph into fewer direct payments.
-
-Example:
+SplitChain calculates each member's net USD balance, separates creditors and debtors, and greedily matches the largest debtor to the largest creditor until the graph is settled.
 
 ```txt
-Before optimization: 7 raw reimbursements
-After optimization: 2 settlement transfers
+Before optimization: many raw reimbursement edges
+After optimization: fewer direct settlement transfers
 ```
 
 ### On-Chain Settlement
 
-SplitChain does not custody funds and does not move money silently.
+SplitChain is non-custodial. It prepares transactions, but the connected wallet always asks the user to sign/send.
 
-When a user clicks `Pay now`:
+Native token settlement:
 
-1. The app verifies the connected wallet matches the debtor.
-2. The app switches or adds the target EVM chain when needed.
-3. If the settlement token is native, it sends `eth_sendTransaction`.
-4. If the settlement token is ERC-20, it encodes `transfer(address,uint256)`.
-5. The wallet asks the user to approve.
-6. The returned transaction hash is stored in local settlement history.
+```txt
+eth_sendTransaction({ to, value })
+```
 
-## Live Data Integrations
+ERC-20 settlement:
+
+```txt
+transfer(address to, uint256 amount)
+```
+
+No SplitChain spender, token custody, escrow, or allowance is introduced.
+
+## Integrations
 
 ### SoSoValue
 
-SoSoValue powers token pricing through the server-side API layer:
+Server-side API usage:
 
 - `GET /currencies`
 - `GET /currencies/{currency_id}/market-snapshot`
 
-The browser never receives the SoSoValue API key. It only calls SplitChain's `/api/market/assets` route.
+The browser never receives the SoSoValue API key. It calls SplitChain's API route:
 
-If the SoSoValue key is temporarily quota-limited, the API keeps the app usable by falling back to real SoDEX public spot ticker prices for supported pairs such as BTC, ETH, SOL, and BNB. Stablecoin entries use stablecoin parity so USDC/USDT expense splitting and settlement demos continue to work.
+```txt
+GET /api/market/assets?symbols=USDC,ETH,BTC,SOL,POL,BNB
+```
+
+### SoSoValue Indexes
+
+SSI index context powers the analytics and settlement recommendation views:
+
+```txt
+GET /api/market/indexes?tickers=ssimag7,ssilayer1
+```
 
 ### SoDEX
 
-SoDEX public spot ticker data powers the market signal panel through:
-
-- `GET /api/sodex/tickers`
-
-This gives the demo an active market-data surface while keeping the main product focused on shared expense settlement.
-
-## Tech Stack
-
-- React
-- TypeScript
-- Vite
-- Node.js
-- Express for local development API
-- Vercel Functions for production API routes
-- viem for ERC-20 calldata and unit parsing
-- lucide-react for UI icons
-- localStorage for Wave 1 demo persistence
-
-## Project Structure
+SoDEX public spot tickers power the spot signal panel:
 
 ```txt
-api/
-  health.ts              Vercel health endpoint
-  market/assets.ts       Vercel SoSoValue market endpoint
-  sodex/tickers.ts       Vercel SoDEX ticker endpoint
-
-server/
-  index.ts               Local Express development server
-  splitchainApi.ts       Shared API logic used by Express and Vercel
-
-src/
-  App.tsx                Main product UI and workflows
-  App.css                Product styling and responsive layout
-  data/chains.ts         Chain and token settlement configuration
-  hooks/                 Local persistence helpers
-  lib/finance.ts         Balance and debt simplification logic
-  lib/wallet.ts          Injected wallet and settlement transaction logic
-  types.ts               App data models
+GET /api/sodex/tickers?symbols=vETH_vUSDC,vBTC_vUSDC,vSOL_vUSDC,vBNB_vUSDC
 ```
 
-## Supported Settlement Chains
+The app now matches the base token exactly, avoiding misleading USDC quote-pair matches.
 
-- Ethereum
-- Base
-- Arbitrum
-- Polygon
-- BNB Chain
+### Supabase
 
-Supported settlement tokens depend on the selected chain. Native token transfers are supported, and USDC/USDT ERC-20 contract addresses are configured on supported EVM chains where available.
+Supabase persistence is optional. When configured, users can save/load workspace data through:
+
+```txt
+GET /api/workspace?owner=<wallet>
+POST /api/workspace?owner=<wallet>
+```
+
+Both operations require a fresh wallet signature. Saves also verify a payload hash before writing to Supabase.
+
+Recommended table:
+
+```sql
+create table if not exists splitchain_workspaces (
+  owner text primary key,
+  payload jsonb not null,
+  updated_at timestamptz not null default now()
+);
+```
 
 ## Environment Variables
 
-Create `.env.local` from `.env.example` for local development:
+Create `.env.local` from `.env.example` for local development. Real secrets should only live in `.env.local` and deployment environment settings.
 
 ```bash
 SOSOVALUE_API_KEY=your_sosovalue_api_key
 SOSOVALUE_API_BASE=https://openapi.sosovalue.com/openapi/v1
 SODEX_SPOT_BASE=https://testnet-gw.sodex.dev/api/v1/spot
+OPENAI_API_KEY=
+SUPABASE_URL=
+SUPABASE_SERVICE_ROLE_KEY=
+SUPABASE_ANON_KEY=
+SUPABASE_WORKSPACE_TABLE=splitchain_workspaces
 PORT=8787
 ```
 
-Production uses the same variables in Vercel Project Settings. `.env.local` and `.vercel` are ignored so secrets do not enter source control.
+`OPENAI_API_KEY` is documented as an optional future/agentic feature variable. The current app does not call OpenAI APIs.
 
 ## Run Locally
 
@@ -198,106 +193,100 @@ npm install
 npm run dev
 ```
 
-The local app starts:
+Local services:
 
-- Vite frontend, usually on `http://localhost:5173`
-- Express API on `http://localhost:8787`
+- Frontend: `http://localhost:5173`
+- API: `http://localhost:8787`
 
-Useful commands:
+## Verification
 
 ```bash
+npm test
 npm run lint
+node_modules/.bin/tsc -b --pretty false
 npm run build
 npm audit --audit-level=high
-npm run dev:api
-npm run dev:client
+```
+
+Useful smoke checks:
+
+```bash
+curl http://localhost:8787/api/health
+curl "http://localhost:8787/api/market/assets?symbols=USDC,ETH,BTC,SOL,POL,MATIC,BNB"
+curl "http://localhost:8787/api/market/indexes?tickers=ssimag7,ssilayer1"
+curl "http://localhost:8787/api/sodex/tickers?symbols=vETH_vUSDC,vBTC_vUSDC,vSOL_vUSDC,vBNB_vUSDC"
 ```
 
 ## Vercel Deployment
 
-This repo is configured for Vercel with:
+The project is configured with `vercel.json`:
 
-- `vercel.json` for Vite build settings and SPA rewrites.
-- Root `api/` functions for production API routes.
-- `.vercelignore` to keep local env files, logs, build output, and dependencies out of deployment uploads.
+- Vite build command: `npm run build`
+- Output directory: `dist`
+- SPA rewrites for non-API routes
+- Root `api/` functions for production API routes
 
-Required production environment variables:
+Required production env vars:
 
-```bash
+```txt
 SOSOVALUE_API_KEY
 SOSOVALUE_API_BASE
 SODEX_SPOT_BASE
 ```
 
-Deployment command:
+Optional production env vars:
+
+```txt
+OPENAI_API_KEY
+SUPABASE_URL
+SUPABASE_SERVICE_ROLE_KEY
+SUPABASE_ANON_KEY
+SUPABASE_WORKSPACE_TABLE
+```
+
+Deploy:
 
 ```bash
 npx vercel --prod
 ```
 
-Current production env status:
+## Project Structure
 
-- `SOSOVALUE_API_KEY`: set in Vercel Production
-- `SOSOVALUE_API_BASE`: set in Vercel Production
-- `SODEX_SPOT_BASE`: set in Vercel Production
+```txt
+api/
+  health.ts
+  market/assets.ts
+  market/indexes.ts
+  sodex/tickers.ts
+  workspace.ts
 
-## Validation Checklist
+server/
+  index.ts
+  splitchainApi.ts
 
-Current audit checks:
+src/
+  App.tsx
+  App.css
+  data/chains.ts
+  hooks/usePersistentState.ts
+  lib/finance.ts
+  lib/wallet.ts
+  lib/workspace.ts
+  lib/workspaceAuth.ts
+  types.ts
 
-- TypeScript production build passes.
-- ESLint passes.
-- npm high-severity audit passes.
-- Local Express health endpoint responds.
-- Local SoSoValue market endpoint returns live token prices.
-- Local SoDEX ticker endpoint returns public ticker data.
-- Browser smoke test confirms hero, live pricing, dashboard, creation flow, and mobile layout.
-- Core product flow was manually tested: add members, create a group, add an expense, and verify optimized balances.
-
-## Wave Roadmap
-
-### Wave 1: MVP
-
-- Polished landing and app experience.
-- Wallet connect through injected EVM wallets.
-- Wallet-native member management.
-- Group creation.
-- Expense creation.
-- Equal, percentage, and custom split modes.
-- Live SoSoValue token pricing.
-- Balance tracking.
-- Debt simplification.
-- On-chain settlement transaction creation.
-- SoDEX public market-data panel.
-- Local workspace export.
-- Vercel-ready deployment.
-
-### Wave 2: Functional Platform
-
-- Database persistence with PostgreSQL or Supabase.
-- User profiles and group invite links.
-- WalletConnect mobile wallet support.
-- Transaction confirmation tracking.
-- Settlement status updates.
-- Payment reminders.
-- Full expense history with filters.
-- Multi-group search.
-- Better token registry and chain metadata handling.
-- Notification layer for unpaid balances.
-
-### Wave 3: Full Web3 Shared Finance App
-
-- Cross-chain settlement routing.
-- Automatic token conversion.
-- Shared group treasuries.
-- Recurring expenses for subscriptions and DAO ops.
-- DAO/team permissions.
-- Exportable accounting reports.
-- Reputation scores for reliable payers.
-- Mobile-first PWA experience.
-- Real-time collaboration.
-- AI summaries for group spending and settlement recommendations.
+tests/
+  finance.test.ts
+  server.test.ts
+  workspace.test.ts
+```
 
 ## Safety Notes
 
-SplitChain is non-custodial. It prepares transactions, but the connected wallet shows the transaction and the user approves or rejects it. Wave 1 data is stored in browser localStorage, so it is ideal for demos but not yet a production accounting database.
+- SplitChain is non-custodial.
+- API keys are server-side only.
+- Real secrets are not committed.
+- Cloud workspace writes require wallet ownership proof.
+- ERC-20 settlement uses direct `transfer()` calls.
+- Pending or failed transactions do not reduce balances.
+- Public demo wallet addresses are demo-only and not private credentials.
