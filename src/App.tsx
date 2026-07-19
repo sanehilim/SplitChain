@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, ty
 import {
   ArrowRight,
   BarChart3,
+  CalendarDays,
   CheckCircle2,
   CircleDollarSign,
   Coins,
@@ -16,6 +17,7 @@ import {
   Settings,
   ShieldCheck,
   Split,
+  TriangleAlert,
   Upload,
   UserPlus,
   Wallet,
@@ -45,6 +47,7 @@ import type {
   Expense,
   Group,
   IndexSnapshot,
+  MacroStatus,
   MarketAsset,
   MarketStatus,
   Member,
@@ -77,6 +80,7 @@ type IndexState = {
 }
 
 type CloudState = {
+  configured?: boolean
   loading: boolean
   message: string
 }
@@ -85,8 +89,23 @@ const categories = ['Travel', 'DAO Ops', 'Subscription', 'Infra', 'Trading Group
 const initialMarketStatus: MarketStatus = { loading: true, error: '', assets: [], updatedAt: '' }
 const initialSodexState: SodexState = { loading: true, error: '', tickers: [], updatedAt: '' }
 const initialIndexState: IndexState = { loading: true, error: '', indexes: [], updatedAt: '' }
-const initialCloudState: CloudState = { loading: false, message: 'Local workspace' }
+const initialMacroState: MacroStatus = { loading: true, error: '', events: [], updatedAt: '' }
+const initialCloudState: CloudState = { loading: true, message: 'Checking cloud sync' }
 const stableTokens = new Set(['USDC', 'USDT'])
+const macroLookaheadDays = 21
+const highImpactMacroKeywords = [
+  'cpi',
+  'fomc',
+  'federal reserve',
+  'inflation',
+  'interest rate',
+  'nonfarm',
+  'payroll',
+  'pce',
+  'gdp',
+  'employment',
+  'unemployment',
+]
 const sodexSymbolsByToken: Partial<Record<string, string>> = {
   BNB: 'vBNB_vUSDC',
   BTC: 'vBTC_vUSDC',
@@ -239,6 +258,88 @@ function formatIndexSignal(index: IndexSnapshot | undefined): string {
   return `${formatPercent(signal.value, { ratio: true })} ${signal.label}`
 }
 
+function formatMacroDate(date: string): string {
+  const parsed = new Date(`${date}T00:00:00.000Z`)
+
+  if (Number.isNaN(parsed.getTime())) {
+    return date
+  }
+
+  return parsed.toLocaleDateString(undefined, {
+    day: 'numeric',
+    month: 'short',
+    timeZone: 'UTC',
+  })
+}
+
+function daysUntilMacroEvent(date: string): number | undefined {
+  const today = new Date()
+  const startOfToday = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())
+  const eventTime = Date.parse(`${date}T00:00:00.000Z`)
+
+  if (!Number.isFinite(eventTime)) {
+    return undefined
+  }
+
+  return Math.round((eventTime - startOfToday) / 86_400_000)
+}
+
+function getMacroRisk(macro: MacroStatus): {
+  label: 'High' | 'Medium' | 'Low' | 'Unavailable'
+  tone: 'negative' | 'warning' | 'positive' | 'neutral'
+  title: string
+  detail: string
+} {
+  if (macro.error || macro.source === 'sosovalue-macro-unavailable') {
+    return {
+      detail: macro.error || macro.fallbackReason || 'SoSoValue Macro events are not available right now.',
+      label: 'Unavailable',
+      title: 'Macro guard offline',
+      tone: 'neutral',
+    }
+  }
+
+  if (macro.loading) {
+    return {
+      detail: 'Loading upcoming macro events from SoSoValue.',
+      label: 'Low',
+      title: 'Macro guard syncing',
+      tone: 'neutral',
+    }
+  }
+
+  const highImpactEvent = macro.events.flatMap((event) => event.events.map((name) => ({ date: event.date, name })))
+    .find((event) => highImpactMacroKeywords.some((keyword) => event.name.toLowerCase().includes(keyword)))
+
+  if (highImpactEvent) {
+    const daysUntil = daysUntilMacroEvent(highImpactEvent.date)
+    return {
+      detail: `${highImpactEvent.name} ${daysUntil === undefined ? `on ${formatMacroDate(highImpactEvent.date)}` : daysUntil === 0 ? 'today' : `in ${daysUntil} day${daysUntil === 1 ? '' : 's'}`}. Prefer stable settlement while macro volatility risk is elevated.`,
+      label: 'High',
+      title: 'High-impact macro event ahead',
+      tone: 'negative',
+    }
+  }
+
+  if (macro.events.length > 0) {
+    const nextEvent = macro.events[0]
+    const firstName = nextEvent.events[0]
+    return {
+      detail: `${firstName} on ${formatMacroDate(nextEvent.date)}. No high-impact keyword matched in the current window.`,
+      label: 'Medium',
+      title: 'Macro calendar active',
+      tone: 'warning',
+    }
+  }
+
+  return {
+    detail: `No listed macro events in the next ${macroLookaheadDays} days.`,
+    label: 'Low',
+    title: 'No near-term macro events',
+    tone: 'positive',
+  }
+}
+
 function App() {
   const [members, setMembers] = usePersistentState<Member[]>('splitchain:members', [])
   const [groups, setGroups] = usePersistentState<Group[]>('splitchain:groups', [])
@@ -249,6 +350,7 @@ function App() {
   const [market, setMarket] = useState<MarketStatus>(initialMarketStatus)
   const [sodex, setSodex] = useState<SodexState>(initialSodexState)
   const [indexes, setIndexes] = useState<IndexState>(initialIndexState)
+  const [macro, setMacro] = useState<MacroStatus>(initialMacroState)
   const [cloud, setCloud] = useState<CloudState>(initialCloudState)
   const [notice, setNotice] = useState<Notice>({ type: 'info', message: 'Ready to create your first crypto split.' })
   const [memberForm, setMemberForm] = useState({ name: '', wallet: '' })
@@ -336,6 +438,7 @@ function App() {
     () => findSodexTickerForToken(sodex.tickers, settlementToken),
     [settlementToken, sodex.tickers],
   )
+  const macroRisk = useMemo(() => getMacroRisk(macro), [macro])
   const settlementRecommendation = useMemo(() => {
     const chain = getChain(settlementChainId)
     const selectedTokenPrice = getTokenPrice(market.assets, settlementToken)
@@ -367,6 +470,15 @@ function App() {
       }
     }
 
+    if (macroRisk.label === 'High' && !isStableToken(settlementToken)) {
+      return {
+        token: stableToken,
+        title: `Prefer ${stableToken} before macro events`,
+        detail: `${macroRisk.detail} ${settlementToken} can still settle, but stablecoin settlement reduces timing risk for the group.`,
+        shortReason: 'Macro guard',
+      }
+    }
+
     if ((indexSignal.value !== undefined && indexSignal.value < -0.01) || (tokenMove !== undefined && Math.abs(tokenMove) > 2)) {
       return {
         token: stableToken,
@@ -386,6 +498,7 @@ function App() {
     }
   }, [
     market.assets,
+    macroRisk,
     primaryIndex,
     settlementChainId,
     settlementToken,
@@ -480,6 +593,40 @@ function App() {
     }
   }, [])
 
+  const refreshMacro = useCallback(async () => {
+    setMacro((current) => ({ ...current, loading: true, error: '' }))
+
+    try {
+      const response = await fetch(`/api/macro/events?days=${macroLookaheadDays}`)
+      const payload = (await response.json()) as {
+        events?: MacroStatus['events']
+        fallbackReason?: string
+        source?: MacroStatus['source']
+        updatedAt?: string
+        error?: string
+      }
+
+      if (!response.ok || !payload.events) {
+        throw new Error(payload.error ?? 'Unable to load SoSoValue Macro events.')
+      }
+
+      setMacro({
+        loading: false,
+        error: '',
+        events: payload.events,
+        fallbackReason: payload.fallbackReason,
+        source: payload.source,
+        updatedAt: payload.updatedAt ?? new Date().toISOString(),
+      })
+    } catch (error) {
+      setMacro((current) => ({
+        ...current,
+        loading: false,
+        error: error instanceof Error ? error.message : 'Unable to load SoSoValue Macro events.',
+      }))
+    }
+  }, [])
+
   useEffect(() => {
     refreshMarket()
     const refreshTimer = window.setInterval(refreshMarket, 30_000)
@@ -495,6 +642,49 @@ function App() {
     const refreshTimer = window.setInterval(refreshIndexes, 60_000)
     return () => window.clearInterval(refreshTimer)
   }, [refreshIndexes])
+
+  useEffect(() => {
+    refreshMacro()
+    const refreshTimer = window.setInterval(refreshMacro, 15 * 60_000)
+    return () => window.clearInterval(refreshTimer)
+  }, [refreshMacro])
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function refreshDeploymentHealth() {
+      try {
+        const response = await fetch('/api/health')
+        const payload = (await response.json()) as { supabaseConfigured?: boolean }
+
+        if (cancelled) {
+          return
+        }
+
+        setCloud((current) => ({
+          ...current,
+          configured: Boolean(payload.supabaseConfigured),
+          loading: false,
+          message: payload.supabaseConfigured ? 'Cloud ready' : 'Cloud not configured',
+        }))
+      } catch {
+        if (!cancelled) {
+          setCloud((current) => ({
+            ...current,
+            configured: false,
+            loading: false,
+            message: 'Local workspace',
+          }))
+        }
+      }
+    }
+
+    refreshDeploymentHealth()
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   useEffect(() => {
     getWalletState()
@@ -752,18 +942,22 @@ function App() {
 
   async function handleSaveCloudWorkspace() {
     try {
+      if (cloud.configured === false) {
+        throw new Error('Supabase persistence is not configured on this deployment.')
+      }
+
       if (!wallet) {
         throw new Error('Connect a wallet before saving a cloud workspace.')
       }
 
-      setCloud({ loading: true, message: 'Signing save...' })
+      setCloud((current) => ({ ...current, loading: true, message: 'Signing save...' }))
       const payloadToSave = normalizeWorkspacePayload(workspacePayload)
       const authHeaders = await signWorkspaceRequest({
         owner: wallet.account,
         operation: 'save',
         payload: payloadToSave,
       })
-      setCloud({ loading: true, message: 'Saving...' })
+      setCloud((current) => ({ ...current, loading: true, message: 'Saving...' }))
       const response = await fetch(`/api/workspace?owner=${encodeURIComponent(wallet.account)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders },
@@ -780,31 +974,36 @@ function App() {
       }
 
       if (payload.configured === false) {
+        setCloud({ configured: false, loading: false, message: 'Cloud not configured' })
         throw new Error('Supabase persistence is not configured on this deployment.')
       }
 
       const updatedAt = payload.workspace?.updatedAt ? new Date(payload.workspace.updatedAt).toLocaleTimeString() : 'now'
-      setCloud({ loading: false, message: `Saved ${updatedAt}` })
+      setCloud({ configured: true, loading: false, message: `Saved ${updatedAt}` })
       showNotice('success', 'Workspace saved to Supabase.')
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Cloud workspace save failed.'
-      setCloud({ loading: false, message })
+      setCloud((current) => ({ ...current, loading: false, message }))
       showNotice('error', message)
     }
   }
 
   async function handleLoadCloudWorkspace() {
     try {
+      if (cloud.configured === false) {
+        throw new Error('Supabase persistence is not configured on this deployment.')
+      }
+
       if (!wallet) {
         throw new Error('Connect a wallet before loading a cloud workspace.')
       }
 
-      setCloud({ loading: true, message: 'Signing load...' })
+      setCloud((current) => ({ ...current, loading: true, message: 'Signing load...' }))
       const authHeaders = await signWorkspaceRequest({
         owner: wallet.account,
         operation: 'load',
       })
-      setCloud({ loading: true, message: 'Loading...' })
+      setCloud((current) => ({ ...current, loading: true, message: 'Loading...' }))
       const response = await fetch(`/api/workspace?owner=${encodeURIComponent(wallet.account)}`, {
         headers: authHeaders,
       })
@@ -819,11 +1018,12 @@ function App() {
       }
 
       if (payload.configured === false) {
+        setCloud({ configured: false, loading: false, message: 'Cloud not configured' })
         throw new Error('Supabase persistence is not configured on this deployment.')
       }
 
       if (!payload.workspace?.payload) {
-        setCloud({ loading: false, message: 'No cloud workspace' })
+        setCloud({ configured: true, loading: false, message: 'No cloud workspace' })
         showNotice('info', 'No Supabase workspace exists for this wallet yet.')
         return
       }
@@ -831,11 +1031,11 @@ function App() {
       const nextWorkspace = normalizeWorkspacePayload(payload.workspace.payload)
       applyWorkspacePayload(nextWorkspace)
       const updatedAt = payload.workspace.updatedAt ? new Date(payload.workspace.updatedAt).toLocaleTimeString() : 'now'
-      setCloud({ loading: false, message: `Loaded ${updatedAt}` })
+      setCloud({ configured: true, loading: false, message: `Loaded ${updatedAt}` })
       showNotice('success', 'Workspace loaded from Supabase.')
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Cloud workspace load failed.'
-      setCloud({ loading: false, message })
+      setCloud((current) => ({ ...current, loading: false, message }))
       showNotice('error', message)
     }
   }
@@ -1764,6 +1964,11 @@ function App() {
             <strong>{settlementRecommendation.token}</strong>
             <small>{settlementRecommendation.shortReason}</small>
           </div>
+          <div className="analytics-block">
+            <span>Macro guard</span>
+            <strong className={macroRisk.tone}>{macroRisk.label}</strong>
+            <small>{macroRisk.title}</small>
+          </div>
         </div>
 
         <div className="insight-columns">
@@ -1793,6 +1998,32 @@ function App() {
                 <div className="insight-row" key={category}>
                   <span>{category}</span>
                   <strong>{formatUsd(amount)}</strong>
+                </div>
+              ))
+            )}
+          </div>
+          <div>
+            <div className="subhead">
+              <h3>Macro calendar</h3>
+              <button className="icon-button" type="button" onClick={refreshMacro} aria-label="Refresh SoSoValue Macro events">
+                <RefreshCcw size={16} />
+              </button>
+            </div>
+            <p className="macro-summary">
+              <TriangleAlert size={15} />
+              {macroRisk.detail}
+            </p>
+            {macro.loading ? (
+              <p className="empty-copy">Loading SoSoValue Macro events.</p>
+            ) : macro.error ? (
+              <p className="market-error">{macro.error}</p>
+            ) : macro.events.length === 0 ? (
+              <p className="empty-copy">No upcoming macro events in the current window.</p>
+            ) : (
+              macro.events.slice(0, 4).map((event) => (
+                <div className="insight-row macro-event-row" key={event.date}>
+                  <span>{formatMacroDate(event.date)}</span>
+                  <strong>{event.events.slice(0, 2).join(', ')}</strong>
                 </div>
               ))
             )}
@@ -1843,15 +2074,30 @@ function App() {
             <strong>{indexes.error ? 'Unavailable' : 'Market context'}</strong>
           </div>
           <div>
+            <CalendarDays size={19} />
+            <span>Macro events</span>
+            <strong>{macro.error || macro.source === 'sosovalue-macro-unavailable' ? 'Unavailable' : macroRisk.label}</strong>
+          </div>
+          <div>
             <Database size={19} />
             <span>Supabase</span>
             <strong>{cloud.message}</strong>
           </div>
-          <button type="button" onClick={handleLoadCloudWorkspace} disabled={cloud.loading}>
+          <button
+            type="button"
+            onClick={handleLoadCloudWorkspace}
+            disabled={cloud.loading || cloud.configured === false}
+            title={cloud.configured === false ? 'Supabase persistence is not configured on this deployment.' : undefined}
+          >
             <Database size={17} />
             Load cloud
           </button>
-          <button type="button" onClick={handleSaveCloudWorkspace} disabled={cloud.loading}>
+          <button
+            type="button"
+            onClick={handleSaveCloudWorkspace}
+            disabled={cloud.loading || cloud.configured === false}
+            title={cloud.configured === false ? 'Supabase persistence is not configured on this deployment.' : undefined}
+          >
             <Database size={17} />
             Save cloud
           </button>

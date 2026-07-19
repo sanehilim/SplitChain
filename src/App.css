@@ -35,10 +35,10 @@
   border-radius: 8px;
   text-decoration: none;
   transition:
-    transform 180ms ease,
-    border-color 180ms ease,
-    background-color 180ms ease,
-    color 180ms ease;
+    transform 180ms var(--ease-out),
+    border-color 180ms var(--ease-out),
+    background-color 180ms var(--ease-out),
+    color 180ms var(--ease-out);
 }
 
 .brand-mark {
@@ -94,6 +94,17 @@
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
+}
+
+.notice span,
+.market-chip,
+.recommendation-card,
+.settlement-proof,
+.analytics-block,
+.insight-row,
+.settings-row > div,
+.settings-row button {
+  min-width: 0;
 }
 
 .notice.success svg {
@@ -238,7 +249,7 @@
   position: relative;
   z-index: 0;
   filter: drop-shadow(0 30px 50px rgba(107, 78, 230, 0.22));
-  animation: floatBase 5.8s ease-in-out infinite;
+  animation: floatBase 5.8s var(--ease-in-out) infinite;
 }
 
 .hero .framework,
@@ -269,7 +280,7 @@
   border-radius: 8px;
   color: white;
   box-shadow: var(--shadow);
-  animation: floatToken 4.6s ease-in-out infinite;
+  animation: floatToken 4.6s var(--ease-in-out) infinite;
 }
 
 .red-token {
@@ -580,6 +591,14 @@ select:focus {
   color: var(--red-dark) !important;
 }
 
+.warning {
+  color: var(--amber) !important;
+}
+
+.neutral {
+  color: var(--muted) !important;
+}
+
 .empty-copy {
   color: var(--muted);
 }
@@ -707,6 +726,27 @@ select:focus {
 
 .analytics-block strong {
   font-size: 24px;
+}
+
+.macro-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 0 2px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.macro-summary svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--amber);
+}
+
+.macro-event-row strong {
+  font-size: 14px;
+  font-weight: 650;
+  text-align: right;
 }
 
 .settings-band {
@@ -904,5 +944,9 @@ select:focus {
 
   .pay-row button {
     width: 100%;
+  }
+
+  .macro-event-row strong {
+    text-align: left;
   }
 }

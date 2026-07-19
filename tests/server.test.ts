@@ -2,7 +2,17 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { test } from 'node:test'
 import { privateKeyToAccount } from 'viem/accounts'
-import { getMarketAssets, getSodexTickers, parseSymbolList, resetApiCachesForTests, saveCloudWorkspace } from '../server/splitchainApi.ts'
+import {
+  getMacroEvents,
+  getMarketAssets,
+  getSodexSpotBase,
+  getSodexTickers,
+  getSosoBase,
+  parseMacroLookaheadDays,
+  parseSymbolList,
+  resetApiCachesForTests,
+  saveCloudWorkspace,
+} from '../server/splitchainApi.ts'
 import { buildWorkspaceSyncMessage, canonicalStringify } from '../src/lib/workspaceAuth.ts'
 import type { WorkspacePayload } from '../src/types.ts'
 
@@ -46,6 +56,31 @@ function jsonResponse(body: unknown, status = 200): Response {
     status,
   })
 }
+
+test('API base helpers ignore blank environment overrides', (t) => {
+  const originalSosoBase = process.env.SOSOVALUE_API_BASE
+  const originalSodexBase = process.env.SODEX_SPOT_BASE
+
+  t.after(() => {
+    if (originalSosoBase === undefined) {
+      delete process.env.SOSOVALUE_API_BASE
+    } else {
+      process.env.SOSOVALUE_API_BASE = originalSosoBase
+    }
+
+    if (originalSodexBase === undefined) {
+      delete process.env.SODEX_SPOT_BASE
+    } else {
+      process.env.SODEX_SPOT_BASE = originalSodexBase
+    }
+  })
+
+  process.env.SOSOVALUE_API_BASE = ''
+  process.env.SODEX_SPOT_BASE = '  '
+
+  assert.equal(getSosoBase(), 'https://openapi.sosovalue.com/openapi/v1')
+  assert.equal(getSodexSpotBase(), 'https://testnet-gw.sodex.dev/api/v1/spot')
+})
 
 test('getMarketAssets reports mixed SoSoValue and fallback sources explicitly', async (t) => {
   resetApiCachesForTests()
@@ -99,6 +134,54 @@ test('parseSymbolList filters invalid symbols and caps public market requests', 
     parseSymbolList('eth,btc,not-valid,sol,bnb,matic,usdc,usdt,pol,avax,link,uni,aave,near,op'),
     ['ETH', 'BTC', 'SOL', 'BNB', 'MATIC', 'USDC', 'USDT', 'POL', 'AVAX', 'LINK', 'UNI', 'AAVE'],
   )
+})
+
+test('parseMacroLookaheadDays validates and caps public macro windows', () => {
+  assert.equal(parseMacroLookaheadDays('30'), 30)
+  assert.equal(parseMacroLookaheadDays('0'), 1)
+  assert.equal(parseMacroLookaheadDays('120'), 90)
+  assert.equal(parseMacroLookaheadDays('not-a-number'), 14)
+})
+
+test('getMacroEvents returns upcoming SoSoValue Macro events from the wrapped API response', async (t) => {
+  resetApiCachesForTests()
+  const originalFetch = globalThis.fetch
+  const originalSosoKey = process.env.SOSOVALUE_API_KEY
+
+  t.after(() => {
+    globalThis.fetch = originalFetch
+    process.env.SOSOVALUE_API_KEY = originalSosoKey
+    resetApiCachesForTests()
+  })
+
+  process.env.SOSOVALUE_API_KEY = 'test-key'
+  globalThis.fetch = async (input) => {
+    const url = String(input)
+
+    if (url.endsWith('/macro/events')) {
+      return jsonResponse({
+        code: 0,
+        message: 'success',
+        data: [
+          { date: '2026-07-18', events: ['Past event'] },
+          { date: '2026-07-19', events: ['CPI', 'CPI', ''] },
+          { date: '2026-07-25', events: ['FOMC Minutes'] },
+          { date: '2026-08-20', events: ['Outside window'] },
+          { date: 'not-a-date', events: ['Invalid'] },
+        ],
+      })
+    }
+
+    throw new Error(`Unexpected fetch: ${url}`)
+  }
+
+  const result = await getMacroEvents('14', new Date('2026-07-19T10:00:00.000Z'))
+
+  assert.equal(result.source, 'sosovalue-macro')
+  assert.deepEqual(result.events, [
+    { date: '2026-07-19', events: ['CPI'] },
+    { date: '2026-07-25', events: ['FOMC Minutes'] },
+  ])
 })
 
 test('getMarketAssets serves stablecoins without spending SoSoValue requests', async (t) => {

@@ -2,7 +2,7 @@
 
 SplitChain is a wallet-native crypto expense-sharing app for groups that split costs across wallets, tokens, and chains. It is a practical "Splitwise for Crypto" for hackathon teams, DAO contributors, travel groups, roommates, and crypto-native communities.
 
-Wave 2 turns the MVP into a more production-ready shared finance workflow: live SoSoValue pricing, SoSoValue Index context, SoDEX market signals, signed cloud persistence, locked expense pricing, transaction confirmation tracking, and tested settlement logic.
+Wave 3 is the final production-readiness pass: live SoSoValue pricing, SoSoValue Index context, SoSoValue Macro events, SoDEX market signals, signed cloud persistence, locked expense pricing, transaction confirmation tracking, hardened dependencies, and tested settlement logic.
 
 ## Live App
 
@@ -19,6 +19,7 @@ https://splitchain-blond.vercel.app
 - Locks USD pricing at expense creation time so balances do not drift when markets move.
 - Uses SoSoValue token market snapshots for live pricing.
 - Uses SoSoValue Indexes, including SSI indexes, for settlement context.
+- Uses SoSoValue Macro events to warn about high-impact calendar risk before volatile-token settlement.
 - Uses exact SoDEX public spot tickers for market/liquidity signals.
 - Simplifies many reimbursement edges into fewer optimized transfers.
 - Sends native-token and direct ERC-20 `transfer()` settlement transactions.
@@ -27,9 +28,16 @@ https://splitchain-blond.vercel.app
 - Exports/imports workspaces as JSON.
 - Includes a protected three-wallet demo flow for judges.
 
-## Wave 2 Upgrades
+## Wave 3 Finalization
 
-The latest production-hardening pass addressed the main judge feedback:
+The final production-hardening pass covers the full end-to-end workflow:
+
+- **SoSoValue Macro guard added:** `/macro/events` powers an upcoming-event calendar and settlement risk guard.
+- **Docs alignment checked:** SoSoValue auth, response wrapper, rate limit, currency snapshots, index snapshots, and macro event endpoints were verified against the current docs.
+- **Rate-limit posture tightened:** Macro events are cached for 15 minutes, index snapshots and market assets are cached, and public endpoints keep per-client request caps.
+- **Dependency audit cleaned:** Vite, esbuild, viem/ws, concurrently/shell-quote, and Babel dependencies were updated; `npm audit --audit-level=high` reports zero vulnerabilities.
+- **UI final polish:** dashboard cards now expose Macro risk, settings show integration health, focus states are visible, reduced-motion preferences are respected, and long dashboard rows wrap safely on mobile.
+- **Deployment-aware cloud controls:** cloud load/save buttons are disabled until `/api/health` confirms Supabase persistence is configured.
 
 - **ERC-20 approval gap fixed:** settlement uses direct ERC-20 `transfer()` calldata. No `approve()` call and no SplitChain allowance spender are created.
 - **Fuller on-chain proof:** settlements are recorded as `pending`, then updated to `confirmed` or `failed` after receipt polling.
@@ -42,8 +50,7 @@ The latest production-hardening pass addressed the main judge feedback:
 - **POL/MATIC compatibility:** Polygon settlement now uses `POL`, while legacy `MATIC` expenses/imports still resolve through the SoSoValue POL asset.
 - **Expense valuation locked:** expense USD amounts and share USD amounts are stored at creation time.
 - **Public API protection:** market-data endpoints include request caps and lightweight in-memory rate limiting.
-- **Automated tests added:** finance, workspace, market fallback, SoDEX exact ticker, and signed Supabase save behavior are covered.
-- **Dependency audit cleaned:** `npm audit --audit-level=high` currently reports zero vulnerabilities.
+- **Automated tests added:** finance, workspace, market fallback, Macro events, blank env fallback, SoDEX exact ticker, and signed Supabase save behavior are covered.
 
 ## Demo Flow
 
@@ -65,6 +72,7 @@ React + Vite UI
   -> Vercel Functions or local Express API
   -> SoSoValue token market snapshots
   -> SoSoValue Index snapshots
+  -> SoSoValue Macro event calendar
   -> SoDEX exact spot tickers
   -> SplitChain balance engine
   -> Debt simplification engine
@@ -72,6 +80,9 @@ React + Vite UI
   -> Native transfer or ERC-20 transfer()
   -> Optional signed Supabase workspace persistence
 ```
+
+
+
 
 ## Core Logic
 
@@ -122,6 +133,9 @@ Server-side API usage:
 
 - `GET /currencies`
 - `GET /currencies/{currency_id}/market-snapshot`
+- `GET /indices`
+- `GET /indices/{index_ticker}/market-snapshot`
+- `GET /macro/events`
 
 The browser never receives the SoSoValue API key. It calls SplitChain's API route:
 
@@ -136,6 +150,16 @@ SSI index context powers the analytics and settlement recommendation views:
 ```txt
 GET /api/market/indexes?tickers=ssimag7,ssilayer1
 ```
+
+### SoSoValue Macro
+
+Upcoming macroeconomic events power the Macro guard in analytics and settlement recommendations:
+
+```txt
+GET /api/macro/events?days=21
+```
+
+The endpoint reads real SoSoValue `/macro/events` data server-side, filters it to the requested upcoming window, caches it for 15 minutes, and returns an explicit unavailable state if the upstream API or key is unavailable.
 
 ### SoDEX
 
@@ -176,15 +200,12 @@ Create `.env.local` from `.env.example` for local development. Real secrets shou
 SOSOVALUE_API_KEY=your_sosovalue_api_key
 SOSOVALUE_API_BASE=https://openapi.sosovalue.com/openapi/v1
 SODEX_SPOT_BASE=https://testnet-gw.sodex.dev/api/v1/spot
-OPENAI_API_KEY=
 SUPABASE_URL=
 SUPABASE_SERVICE_ROLE_KEY=
 SUPABASE_ANON_KEY=
 SUPABASE_WORKSPACE_TABLE=splitchain_workspaces
 PORT=8787
 ```
-
-`OPENAI_API_KEY` is documented as an optional future/agentic feature variable. The current app does not call OpenAI APIs.
 
 ## Run Locally
 
@@ -214,6 +235,7 @@ Useful smoke checks:
 curl http://localhost:8787/api/health
 curl "http://localhost:8787/api/market/assets?symbols=USDC,ETH,BTC,SOL,POL,MATIC,BNB"
 curl "http://localhost:8787/api/market/indexes?tickers=ssimag7,ssilayer1"
+curl "http://localhost:8787/api/macro/events?days=21"
 curl "http://localhost:8787/api/sodex/tickers?symbols=vETH_vUSDC,vBTC_vUSDC,vSOL_vUSDC,vBNB_vUSDC"
 ```
 
@@ -230,14 +252,13 @@ Required production env vars:
 
 ```txt
 SOSOVALUE_API_KEY
-SOSOVALUE_API_BASE
-SODEX_SPOT_BASE
 ```
 
 Optional production env vars:
 
 ```txt
-OPENAI_API_KEY
+SOSOVALUE_API_BASE
+SODEX_SPOT_BASE
 SUPABASE_URL
 SUPABASE_SERVICE_ROLE_KEY
 SUPABASE_ANON_KEY
@@ -255,6 +276,7 @@ npx vercel --prod
 ```txt
 api/
   health.ts
+  macro/events.ts
   market/assets.ts
   market/indexes.ts
   sodex/tickers.ts
@@ -285,6 +307,7 @@ tests/
 
 - SplitChain is non-custodial.
 - API keys are server-side only.
+- Market, index, macro, and spot data are fetched from real APIs; unavailable upstream data is shown explicitly instead of silently faked.
 - Real secrets are not committed.
 - Cloud workspace writes require wallet ownership proof.
 - ERC-20 settlement uses direct `transfer()` calls.

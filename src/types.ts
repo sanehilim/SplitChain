@@ -85,6 +85,20 @@ export type IndexSnapshot = {
   updatedAt: string
 }
 
+export type MacroEvent = {
+  date: string
+  events: string[]
+}
+
+export type MacroStatus = {
+  loading: boolean
+  error: string
+  events: MacroEvent[]
+  fallbackReason?: string
+  source?: 'sosovalue-macro' | 'sosovalue-macro-unavailable'
+  updatedAt: string
+}
+
 export type WorkspacePayload = {
   members: Member[]
   groups: Group[]

@@ -57,6 +57,18 @@ export type IndexSnapshot = {
   updatedAt: string
 }
 
+export type MacroEvent = {
+  date: string
+  events: string[]
+}
+
+export type MacroEventsResponse = {
+  events: MacroEvent[]
+  fallbackReason?: string
+  source: 'sosovalue-macro' | 'sosovalue-macro-unavailable'
+  updatedAt: string
+}
+
 export type WorkspacePayload = {
   members: unknown[]
   groups: unknown[]
@@ -96,6 +108,7 @@ const currencyCache: CacheEntry<Currency[]> = { expiresAt: 0, value: [] }
 const snapshotCache = new Map<string, CacheEntry<CurrencySnapshot>>()
 const indexListCache: CacheEntry<string[]> = { expiresAt: 0, value: [] }
 const indexSnapshotCache = new Map<string, CacheEntry<Record<string, unknown>>>()
+const macroEventsCache = new Map<string, CacheEntry<MacroEvent[]>>()
 const publicRateLimitBuckets = new Map<string, RateLimitBucket>()
 const currencyAliases: Record<string, string> = {
   MATIC: 'POL',
@@ -107,6 +120,9 @@ const defaultMarketSymbols = ['USDC', 'USDT', 'ETH', 'BTC', 'SOL', 'MATIC', 'BNB
 const maxMarketSymbols = 12
 const maxIndexTickers = 4
 const maxSodexSymbols = 8
+const defaultMacroLookaheadDays = 14
+const maxMacroLookaheadDays = 90
+const maxMacroEvents = 30
 const publicRateLimitWindowMs = 60 * 1000
 const publicRateLimitMaxRequests = 60
 const maxWorkspaceMembers = 100
@@ -128,15 +144,16 @@ export function resetApiCachesForTests(): void {
   indexListCache.expiresAt = 0
   indexListCache.value = []
   indexSnapshotCache.clear()
+  macroEventsCache.clear()
   publicRateLimitBuckets.clear()
 }
 
 export function getSosoBase(): string {
-  return process.env.SOSOVALUE_API_BASE ?? 'https://openapi.sosovalue.com/openapi/v1'
+  return readEnvString(process.env.SOSOVALUE_API_BASE) ?? 'https://openapi.sosovalue.com/openapi/v1'
 }
 
 export function getSodexSpotBase(): string {
-  return process.env.SODEX_SPOT_BASE ?? 'https://testnet-gw.sodex.dev/api/v1/spot'
+  return readEnvString(process.env.SODEX_SPOT_BASE) ?? 'https://testnet-gw.sodex.dev/api/v1/spot'
 }
 
 export function getHealthPayload() {
@@ -181,6 +198,11 @@ export function assertPublicApiRateLimit(scope: string, key = 'anonymous'): void
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
+}
+
+function readEnvString(value: string | undefined): string | undefined {
+  const trimmedValue = value?.trim()
+  return trimmedValue ? trimmedValue : undefined
 }
 
 function unwrapData<T>(payload: unknown): T {
@@ -357,6 +379,20 @@ export function parseIndexTickerList(tickersParam: unknown): string[] {
   )
 
   return tickers.length > 0 ? tickers : defaultIndexTickers.map((ticker) => ticker.toLowerCase())
+}
+
+export function parseMacroLookaheadDays(daysParam: unknown): number {
+  const rawDays = typeof daysParam === 'string'
+    ? Number(daysParam)
+    : Array.isArray(daysParam) && typeof daysParam[0] === 'string'
+      ? Number(daysParam[0])
+      : defaultMacroLookaheadDays
+
+  if (!Number.isFinite(rawDays)) {
+    return defaultMacroLookaheadDays
+  }
+
+  return Math.min(Math.max(Math.trunc(rawDays), 1), maxMacroLookaheadDays)
 }
 
 function parseSodexSymbolList(symbolsParam: unknown): string[] {
@@ -540,6 +576,97 @@ async function getSosoIndexSnapshot(ticker: string): Promise<IndexSnapshot> {
     ytd: asNumber(snapshot.ytd),
     source: 'sosovalue-index',
     updatedAt,
+  }
+}
+
+function readDateKey(date: Date): string {
+  return date.toISOString().slice(0, 10)
+}
+
+function addUtcDays(date: Date, days: number): Date {
+  const nextDate = new Date(date)
+  nextDate.setUTCDate(nextDate.getUTCDate() + days)
+  return nextDate
+}
+
+function readMacroDate(value: unknown): string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return ''
+  }
+
+  const parsed = Date.parse(`${value}T00:00:00.000Z`)
+  return Number.isFinite(parsed) ? value : ''
+}
+
+export function normalizeMacroEvents(payload: unknown, lookaheadDays: number, now = new Date()): MacroEvent[] {
+  if (!Array.isArray(payload)) {
+    return []
+  }
+
+  const today = readDateKey(now)
+  const windowEnd = readDateKey(addUtcDays(now, lookaheadDays))
+
+  return payload
+    .map((entry): MacroEvent | null => {
+      if (!isRecord(entry)) {
+        return null
+      }
+
+      const date = readMacroDate(entry.date)
+      const events = Array.isArray(entry.events)
+        ? Array.from(new Set(
+            entry.events
+              .map((event) => (typeof event === 'string' ? event.trim() : ''))
+              .filter(Boolean)
+              .slice(0, 12),
+          ))
+        : []
+
+      if (!date || events.length === 0 || date < today || date > windowEnd) {
+        return null
+      }
+
+      return { date, events }
+    })
+    .filter((entry): entry is MacroEvent => Boolean(entry))
+    .sort((left, right) => left.date.localeCompare(right.date))
+    .slice(0, maxMacroEvents)
+}
+
+export async function getMacroEvents(daysParam: unknown, now = new Date()): Promise<MacroEventsResponse> {
+  const lookaheadDays = parseMacroLookaheadDays(daysParam)
+  const cacheKey = `${lookaheadDays}:${readDateKey(now)}`
+  const cached = macroEventsCache.get(cacheKey)
+  const updatedAt = new Date().toISOString()
+
+  if (cached && Date.now() < cached.expiresAt) {
+    return {
+      events: cached.value,
+      source: 'sosovalue-macro',
+      updatedAt,
+    }
+  }
+
+  try {
+    const payload = await sosoFetch<unknown[]>('/macro/events')
+    const events = normalizeMacroEvents(payload, lookaheadDays, now)
+    macroEventsCache.set(cacheKey, {
+      expiresAt: Date.now() + 15 * 60 * 1000,
+      value: events,
+    })
+
+    return {
+      events,
+      source: 'sosovalue-macro',
+      updatedAt,
+    }
+  } catch (error) {
+    return {
+      events: [],
+      fallbackReason: `SoSoValue Macro unavailable: ${readErrorMessage(error)}`,
+      source: 'sosovalue-macro-unavailable',
+      updatedAt,
+    }
   }
 }
 

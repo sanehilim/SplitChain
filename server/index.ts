@@ -8,6 +8,7 @@ import {
   getCloudWorkspace,
   getHealthPayload,
   getIndexSnapshots,
+  getMacroEvents,
   getMarketAssets,
   getSodexTickers,
   PublicRateLimitError,
@@ -46,6 +47,17 @@ app.get('/api/market/indexes', async (request, response) => {
   } catch (error) {
     response.status(error instanceof PublicRateLimitError ? error.statusCode : 502).json({
       error: error instanceof Error ? error.message : 'Unable to load SoSoValue Index data.',
+    })
+  }
+})
+
+app.get('/api/macro/events', async (request, response) => {
+  try {
+    assertPublicApiRateLimit('macro-events', readClientRateLimitKey(request.headers, request.ip))
+    response.json(await getMacroEvents(request.query.days))
+  } catch (error) {
+    response.status(error instanceof PublicRateLimitError ? error.statusCode : 502).json({
+      error: error instanceof Error ? error.message : 'Unable to load SoSoValue Macro events.',
     })
   }
 })
